@@ -337,3 +337,7 @@ ENTRY(sys_call_table)
 	.long sys_rt_tgsigqueueinfo	/* 335 */
 	.long sys_perf_event_open
 	.long sys_recvmmsg
+#ifdef	CONFIG_SCHED_PARTITION_POLICY
+	.long sys_partition_scheduler_prepare
+	.long sys_partition_scheduler_start_to_end
+#endif

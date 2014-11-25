@@ -343,10 +343,18 @@
 #define __NR_rt_tgsigqueueinfo	335
 #define __NR_perf_event_open	336
 #define __NR_recvmmsg		337
+#ifdef	CONFIG_SCHED_PARTITION_POLICY
+#define __NR_partition_scheduler_prepare 338
+#define __NR_partition_scheduler_start_to_end 339
+#endif
 
 #ifdef __KERNEL__
 
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+#define NR_syscalls 340
+#else
 #define NR_syscalls 338
+#endif
 
 #define __ARCH_WANT_IPC_PARSE_VERSION
 #define __ARCH_WANT_OLD_READDIR

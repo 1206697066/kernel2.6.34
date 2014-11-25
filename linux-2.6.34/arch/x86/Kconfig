@@ -2103,6 +2103,13 @@ config SYSVIPC_COMPAT
 
 endmenu
 
+menu "partition scheduler"
+
+config SCHED_PARTITION_POLICY
+	bool "partition scheduling policy"
+	default y
+endmenu
+
 
 config HAVE_ATOMIC_IOMAP
 	def_bool y

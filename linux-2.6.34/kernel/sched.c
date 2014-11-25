@@ -81,6 +81,11 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+#include <linux/string.h>
+#include <linux/random.h>
+#endif
+
 /*
  * Convert user-nice values [ -20 ... 0 ... 19 ]
  * to static priority [ MAX_RT_PRIO..MAX_PRIO-1 ],
@@ -120,11 +125,13 @@
  */
 #define RUNTIME_INF	((u64)~0ULL)
 
+
 static inline int rt_policy(int policy)
 {
 	if (unlikely(policy == SCHED_FIFO || policy == SCHED_RR))
 		return 1;
-	return 0;
+	else
+		return 0;
 }
 
 static inline int task_has_rt_policy(struct task_struct *p)
@@ -512,6 +519,10 @@ struct rq {
 
 	struct cfs_rq cfs;
 	struct rt_rq rt;
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+	struct partition_rq partition;		
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this cpu: */
@@ -1831,9 +1842,12 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 #endif
 }
 
-static const struct sched_class rt_sched_class;
+#ifdef 	CONFIG_SCHED_PARTITION_POLICY
+	#define sched_class_highest (&partition_sched_class)
+#else
+	#define sched_class_highest (&rt_sched_class)
+#endif
 
-#define sched_class_highest (&rt_sched_class)
 #define for_each_class(class) \
    for (class = sched_class_highest; class; class = class->next)
 
@@ -1932,6 +1946,11 @@ static void deactivate_task(struct rq *rq, struct task_struct *p, int sleep)
 #include "sched_idletask.c"
 #include "sched_fair.c"
 #include "sched_rt.c"
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+#include "sched_partition.c"
+#endif
+
 #ifdef CONFIG_SCHED_DEBUG
 # include "sched_debug.c"
 #endif
@@ -3518,14 +3537,34 @@ void scheduler_tick(void)
 	struct rq *rq = cpu_rq(cpu);
 	struct task_struct *curr = rq->curr;
 
-	sched_clock_tick();
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+	unsigned long long start, end;
+#endif
 
+	sched_clock_tick();
 	raw_spin_lock(&rq->lock);
 	update_rq_clock(rq);
 	update_cpu_load(rq);
-	curr->sched_class->task_tick(rq, curr, 0);
-	raw_spin_unlock(&rq->lock);
 
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+    start = sched_clock_cpu(cpu);
+#endif
+
+	curr->sched_class->task_tick(rq, curr, 0);
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+	end = sched_clock_cpu(cpu);
+#endif
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+	rq->partition.partition_cpu_tick++;
+	if(curr->policy == SCHED_PARTITION)
+		update_data(rq, end-start);
+	mb();
+	set_tsk_need_resched(rq->curr);	
+#endif
+
+	raw_spin_unlock(&rq->lock);
 	perf_event_task_tick(curr);
 
 #ifdef CONFIG_SMP
@@ -3672,12 +3711,12 @@ pick_next_task(struct rq *rq)
 	/*
 	 * Optimization: we know that if all tasks are in
 	 * the fair class we can call that function directly:
-	 */
+	 
 	if (likely(rq->nr_running == rq->cfs.nr_running)) {
 		p = fair_sched_class.pick_next_task(rq);
 		if (likely(p))
 			return p;
-	}
+	}*/
 
 	class = sched_class_highest;
 	for ( ; ; ) {
@@ -3697,11 +3736,15 @@ pick_next_task(struct rq *rq)
  */
 asmlinkage void __sched schedule(void)
 {
+	
 	struct task_struct *prev, *next;
 	unsigned long *switch_count;
 	struct rq *rq;
 	int cpu;
-
+	#ifdef	CONFIG_SCHED_PARTITION_POLICY
+	struct partition_scheduling *partition_sched;
+	partition_sched = get_partition_scheduling();
+	#endif
 need_resched:
 	preempt_disable();
 	cpu = smp_processor_id();
@@ -3721,24 +3764,53 @@ need_resched_nonpreemptible:
 	raw_spin_lock_irq(&rq->lock);
 	update_rq_clock(rq);
 	clear_tsk_need_resched(prev);
-
-	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) {
-		if (unlikely(signal_pending_state(prev->state, prev)))
+	#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->lcm < 40)
+			printk(KERN_ALERT "curr = prev, state:%ld,cpu:%d,pid:%d",prev->state,rq->cpu,rq->curr->pid);
+	#endif
+	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) { //state大于0代表prev也就是当前运行的任务不是running状态，并且没有标记 PREEMPT_ACTIVE，就表示当前的运行的任务没有必要停留在运行队列中了
+		if (unlikely(signal_pending_state(prev->state, prev))) //如果当前进程标记了状态是TASK_INTERRUPTIBLE，并且还有信号未处理，那么没有必要从运行队列中移除这个进程
 			prev->state = TASK_RUNNING;
 		else
+		#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		{
+			if(partition_sched->turn_on && partition_sched->lcm < 40)
+				printk(KERN_ALERT "task is delete from runqueue,curr id:%d,cpu:%d,pid:%d",rq->curr->partition_id,rq->cpu,rq->curr->pid);
 			deactivate_task(rq, prev, 1);
+			
+		}
+		#endif	
 		switch_count = &prev->nvcsw;
 	}
 
 	pre_schedule(rq, prev);
 
-	if (unlikely(!rq->nr_running))
+	if (unlikely(!rq->nr_running))//如果当前运行队列没有进程可以运行了，就balance其他运行队列的任务到当前运行队列
 		idle_balance(cpu, rq);
 
 	put_prev_task(rq, prev);
 	next = pick_next_task(rq);
-
+	#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->lcm < 40)
+			printk(KERN_ALERT "next state1:%ld,curr state:%ld,cpu:%d,curr pid:%d,next pid:%d",next->state,rq->curr->state,rq->cpu,rq->curr->pid,next->pid);
+	#endif
 	if (likely(prev != next)) {
+		
+		#ifdef CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->cpu_bitmap[cpu] &&partition_sched->lcm < 40)
+		{	
+			if(prev->policy == SCHED_PARTITION && next->policy == SCHED_PARTITION)
+			{
+				printk(KERN_ALERT "from partition %d to partition %d,cpu:%d,from real %d to real %d",prev->partition_id,next->partition_id,rq->cpu,prev->pid,next->pid);
+			}
+			else
+				if(next->policy == SCHED_PARTITION)
+					printk(KERN_ALERT "from normal %d to partition %d,cpu:%d,from real %d to real %d",prev->partition_id,next->partition_id,rq->cpu,prev->pid,next->pid);
+				else
+					if(prev->policy == SCHED_PARTITION)
+						printk(KERN_ALERT "from partition %d to normal %d,cpu:%d,from real %d to real %d",prev->partition_id,next->partition_id,rq->cpu,prev->pid,next->pid);
+        }
+		#endif
 		sched_info_switch(prev, next);
 		perf_event_task_sched_out(prev, next);
 
@@ -3753,12 +3825,22 @@ need_resched_nonpreemptible:
 		 */
 		cpu = smp_processor_id();
 		rq = cpu_rq(cpu);
+		#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->lcm < 40)
+			printk(KERN_ALERT "prev state2:%ld,curr state2:%ld,next state2:%ld,cpu:%d,real id:%d",prev->state,rq->curr->state,next->state,rq->cpu,rq->curr->pid);
+		#endif
 	} else
 		raw_spin_unlock_irq(&rq->lock);
+		
+		
 
 	post_schedule(rq);
 
 	if (unlikely(reacquire_kernel_lock(current) < 0)) {
+		#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->lcm < 40)
+			printk(KERN_ALERT "got need_resched_nonpreemptible,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
+		#endif
 		prev = rq->curr;
 		switch_count = &prev->nivcsw;
 		goto need_resched_nonpreemptible;
@@ -3766,7 +3848,14 @@ need_resched_nonpreemptible:
 
 	preempt_enable_no_resched();
 	if (need_resched())
+	{
+		#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		if(partition_sched->turn_on && partition_sched->lcm < 40)
+			printk(KERN_ALERT "got need_resched,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
+		#endif
 		goto need_resched;
+	}
+		
 }
 EXPORT_SYMBOL(schedule);
 
@@ -4471,10 +4560,28 @@ __setscheduler(struct rq *rq, struct task_struct *p, int policy, int prio)
 	p->normal_prio = normal_prio(p);
 	/* we are holding p->pi_lock already */
 	p->prio = rt_mutex_getprio(p);
-	if (rt_prio(p->prio))
+	/*if (rt_prio(p->prio))
 		p->sched_class = &rt_sched_class;
 	else
-		p->sched_class = &fair_sched_class;
+		p->sched_class = &fair_sched_class;*/
+	
+	switch (p->policy)
+		{
+		case SCHED_NORMAL:
+		case SCHED_BATCH:
+		case SCHED_IDLE:
+			p->sched_class = &fair_sched_class;
+			break;
+		#ifdef	CONFIG_SCHED_PARTITION_POLICY
+		case SCHED_PARTITION:
+		        p->sched_class = &partition_sched_class;
+		        break;
+		#endif
+		case SCHED_FIFO:
+		case SCHED_RR:
+			p->sched_class = &rt_sched_class;
+			break;
+		}
 	set_load_weight(p);
 }
 
@@ -4497,11 +4604,18 @@ static bool check_same_owner(struct task_struct *p)
 static int __sched_setscheduler(struct task_struct *p, int policy,
 				struct sched_param *param, bool user)
 {
+	#ifdef CONFIG_SCHED_PARTITION_POLICY
+	int i;
+	#endif
 	int retval, oldprio, oldpolicy = -1, on_rq, running;
 	unsigned long flags;
 	const struct sched_class *prev_class;
 	struct rq *rq;
 	int reset_on_fork;
+
+	#ifdef CONFIG_SCHED_PARTITION_POLICY
+	struct partition_scheduling *partition_sched;
+	#endif
 
 	/* may grab non-irq protected spin_locks */
 	BUG_ON(in_interrupt());
@@ -4516,7 +4630,11 @@ recheck:
 
 		if (policy != SCHED_FIFO && policy != SCHED_RR &&
 				policy != SCHED_NORMAL && policy != SCHED_BATCH &&
-				policy != SCHED_IDLE)
+				policy != SCHED_IDLE &&
+				#ifdef CONFIG_SCHED_PARTITION_POLICY
+				policy != SCHED_PARTITION
+				#endif				
+				)
 			return -EINVAL;
 	}
 
@@ -4531,6 +4649,11 @@ recheck:
 		return -EINVAL;
 	if (rt_policy(policy) != (param->sched_priority != 0))
 		return -EINVAL;
+
+	#ifdef CONFIG_SCHED_PARTITION_POLICY
+	if(policy == SCHED_PARTITION && policy == p->policy)
+		return -EINVAL;
+	#endif
 
 	/*
 	 * Allow unprivileged RT tasks to decrease priority:
@@ -4614,7 +4737,56 @@ recheck:
 
 	oldprio = p->prio;
 	prev_class = p->sched_class;
+
+
 	__setscheduler(rq, p, policy, param->sched_priority);
+
+
+
+
+
+	#ifdef CONFIG_SCHED_PARTITION_POLICY
+	if(policy == SCHED_PARTITION)
+ 	{
+		if(param->level == 1)
+		{
+			p->c_level = 1;
+			p->c = (int *)kmalloc(sizeof(int) * param->c_level,GFP_KERNEL);
+			if(!p->c)
+				return -ENOMEM;
+			p->c = NULL;
+		}
+		else
+		{
+			p->c_level = param->c_level;
+			p->c = (int *)kmalloc(sizeof(int) * param->c_level,GFP_KERNEL);
+			if(!p->c)
+				return -ENOMEM;
+			//strcpy(p->c,param->c);
+			for(i=0; i<p->c_level; i++)
+				p->c[i] = param->c[i];
+		}
+		p->partition_id = param->partition_id;
+		p->idle_flag = param->idle_flag;
+		p->c_real = param->c_real;
+		p->p = param->p;
+		
+		#ifdef PARTITION_DEBUG
+		print_p_para_of_task(p);
+		#endif
+		partition_sched = get_partition_scheduling();
+		spin_lock(&partition_sched->lock);
+		if(p->idle_flag)
+		{
+			add_partition_idle_task_list(rq, p);
+		}
+		else
+			add_partition_task_list(rq, p);
+		spin_unlock(&partition_sched->lock);
+		
+	}
+	#endif
+
 
 	if (running)
 		p->sched_class->set_curr_task(rq);
@@ -7742,6 +7914,11 @@ void __init sched_init(void)
 	update_shares_data = __alloc_percpu(nr_cpu_ids * sizeof(unsigned long),
 					    __alignof__(unsigned long));
 #endif
+
+#ifdef	CONFIG_SCHED_PARTITION_POLICY
+        init_partition_scheduling();
+#endif
+
 	for_each_possible_cpu(i) {
 		struct rq *rq;
 
@@ -7750,6 +7927,11 @@ void __init sched_init(void)
 		rq->nr_running = 0;
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+		init_partition_rq(&rq->partition);
+#endif
+
 		init_cfs_rq(&rq->cfs, rq);
 		init_rt_rq(&rq->rt, rq);
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -9206,3 +9388,219 @@ void synchronize_sched_expedited(void)
 EXPORT_SYMBOL_GPL(synchronize_sched_expedited);
 
 #endif /* #else #ifndef CONFIG_SMP */
+
+#ifdef	CONFIG_SCHED_PARTITION_POLICY
+
+int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
+{
+	int i;
+	unsigned long num;
+    int retval = -ESRCH;
+	pid_t *k_pid;
+	struct partition_para *k_para;
+	struct task_struct *p;
+	struct sched_param kparam;
+	k_pid = (pid_t *)kmalloc(sizeof(pid_t) * num_partition_thread, GFP_KERNEL);
+	if(!k_pid)
+		return -ENOMEM;
+	if(copy_from_user(k_pid, pid, sizeof(pid_t) * num_partition_thread))
+	{
+		kfree(k_pid);
+		return -EFAULT;
+	}
+	k_para = (struct partition_para *)kmalloc(sizeof(struct partition_para) * num_partition_thread, GFP_KERNEL);
+	if(!k_para)
+		return -ENOMEM;
+	if(copy_from_user(k_para, para, sizeof(struct partition_para) * num_partition_thread))
+	{
+		kfree(k_para);
+		kfree(k_pid);
+		return -EFAULT;	
+	}
+	//srand((unsigned)(time(0)));
+	for(i=0; i<num_partition_thread; i++)
+	{
+		kparam.level = level;
+		kparam.sched_priority = 0;
+		if(level == 1)//all the job are level 1,LEVEL = 1
+		{
+			kparam.c_level = 1;
+			kparam.c_real = k_para[i].c[0];
+			kparam.c = (int *)kmalloc(sizeof(int)*k_para[i].c_level, GFP_KERNEL);
+			if(!kparam.c)
+				return -ENOMEM;
+			kparam.c = NULL;
+		}
+		else//LEVEL != 1
+		{
+			kparam.c_level = k_para[i].c_level;
+			kparam.c = (int *)kmalloc(sizeof(int)*k_para[i].c_level, GFP_KERNEL);
+			if(!kparam.c)
+				return -ENOMEM;
+			if(copy_from_user(kparam.c, k_para[i].c, sizeof(int) * k_para[i].c_level))
+			{
+				kfree(kparam.c);
+				return -EFAULT;
+			}
+			get_random_bytes(&num, sizeof(unsigned long));
+			kparam.c_real = kparam.c[0] + num % (kparam.c[kparam.c_level-1] - kparam.c[0]);
+		}
+		
+		kparam.p = k_para[i].period;
+		kparam.partition_id = k_para[i].virtual_id;
+		kparam.idle_flag = k_para[i].idle_flag;
+
+		#ifdef PARTITION_DEBUG
+		print_sched_kparam_of_job(num_partition_thread, kparam);
+		#endif
+		rcu_read_lock();
+		p = find_process_by_pid(k_pid[i]);
+		if(p != NULL)
+		{
+			retval = sched_setscheduler(p, SCHED_PARTITION, &kparam);
+			#ifdef PARTITION_DEBUG	
+			printk(KERN_ALERT "real_id:%d logical_id:%d",p->pid,p->partition_id);
+			#endif
+			if(retval !=0)
+			{
+				rcu_read_unlock();
+				kfree(k_pid);
+				kfree(k_para);
+				return retval;
+			}		
+		}
+	rcu_read_unlock();
+	}
+	kfree(k_pid);
+	kfree(k_para);
+	return retval;
+}
+
+int partition_num_online_cpus(void)
+{
+	int i;
+	struct rq *rq;
+	int retval = 0;
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_num_online_cpus start");
+	#endif
+    retval = num_online_cpus();
+	for(i=0; i<retval; i++)
+	{
+		rq = cpu_rq(i);
+		rq->partition.partition_cpu_tick = 0;
+	}
+	
+    return retval;
+}
+int partition_set_cpu_affinity(int num_online_cpus)
+{
+	int i;
+	struct partition_scheduling *partition_sched;
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_set_cpu_affinifty start");
+	#endif
+	partition_sched = get_partition_scheduling();
+	partition_sched->total_num_cpu = num_online_cpus;
+	partition_sched->partition_num_cpu = num_online_cpus - 1;
+	partition_sched->cpu_bitmap = (int *)kmalloc( sizeof(int) * num_online_cpus, GFP_KERNEL);
+	if(!partition_sched->cpu_bitmap)
+		return -ENOMEM;
+	for(i=0; i<partition_sched->partition_num_cpu; i++)
+		partition_sched->cpu_bitmap[i] = 1;
+	partition_sched->cpu_bitmap[partition_sched->partition_num_cpu] = 0;
+		
+	#ifdef PARTITION_DEBUG
+		printk(KERN_ALERT "total_num_cpu:%d  partition_num_cpu:%d",partition_sched->total_num_cpu,partition_sched->partition_num_cpu);
+	#endif
+	return 0;
+}
+int partition_setpara(int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
+{
+	int ret = 0;
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_setpara start");
+	#endif
+	ret = do_sched_setscheduler_normal_to_partition(num_partition_thread, pid, para, level);
+	
+	return ret;
+}
+int partition_scheduler_start(void)
+{
+	int i,retval = 0;
+	struct rq *rq;
+	struct partition_scheduling *partition_sched;
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_scheduler_start start");
+	#endif
+	partition_sched = get_partition_scheduling();
+	
+	spin_lock(&partition_sched->lock);
+/*	allocate_idle_tasks_on_cpus:
+	每个执行partition任务的cpu的read_list添加一个idle任务，这个任务在调度结束前不退出队列
+*/
+	allocate_idle_tasks_on_cpus(partition_sched);
+/*	allocate_tasks_on_cpus
+	partiton调度算法，把所有partition任务按照cpu利用率分配到固定的cpu上
+*/
+	//allocate_tasks_on_cpus(partition_sched);
+	spin_unlock(&partition_sched->lock);
+	
+	mb();
+	spin_lock(&partition_sched->lock);
+	partition_sched->turn_on = 1;//开启调度开关，在pick_next_task中使用
+	spin_unlock(&partition_sched->lock);
+
+	for(i=0; i<partition_sched->total_num_cpu; i++)
+	{
+		if(partition_sched->cpu_bitmap[i])
+		{
+			rq = cpu_rq(i);	
+			rq->partition.ready = 1;
+			mb();
+			resched_cpu(i);	
+		}
+		
+	}
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_scheduler_start end");
+	#endif
+	return retval;
+}
+int partition_current_tick(void)
+{
+	struct partition_scheduling *partition_sched;
+	p_sched =get_partition_scheduling();
+	return p_sched->lcm;
+}
+int partition_scheduler_end(void)
+{return 6;}
+asmlinkage long sys_partition_scheduler_prepare(int flag, int num_online_cpus, int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
+{
+	int retval;
+	switch(flag)
+	{
+		case 1:{retval = partition_num_online_cpus(); break;}
+		case 2:{retval = partition_set_cpu_affinity(num_online_cpus); break;}
+		case 3:{retval = partition_setpara(num_partition_thread, pid, para, level); break;}	
+		default:return -1;
+	}
+	return retval;
+	
+}
+asmlinkage long sys_partition_scheduler_start_to_end(int flag)
+{
+	int retval;
+	switch(flag)
+	{
+		case 1:{retval = partition_scheduler_start(); break;}
+		case 2:{retval = partition_current_tick(); break;}
+		case 3:{retval = partition_scheduler_end();break;}	
+		default:return -1;
+	}
+	return retval;
+}
+
+
+#endif
+

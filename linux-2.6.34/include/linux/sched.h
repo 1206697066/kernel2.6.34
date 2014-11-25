@@ -38,6 +38,11 @@
 #define SCHED_BATCH		3
 /* SCHED_ISO: reserved but not implemented yet */
 #define SCHED_IDLE		5
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+#define SCHED_PARTITION         6
+#endif
+
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
 #define SCHED_RESET_ON_FORK     0x40000000
 
@@ -45,6 +50,16 @@
 
 struct sched_param {
 	int sched_priority;
+
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+	int level;//the value of the LEVEL
+	int c_level;//the level of the job
+	int c_real;
+	int *c;
+	int p;
+	int partition_id;
+	int idle_flag;
+#endif
 };
 
 #include <asm/param.h>	/* for HZ */
@@ -1505,7 +1520,30 @@ struct task_struct {
 		unsigned long memsw_bytes; /* uncharged mem+swap usage */
 	} memcg_batch;
 #endif
+
+
+#ifdef	CONFIG_SCHED_PARTITION_POLICY
+	int         partition_id;       /*logical id for partition task*/
+    int         idle_flag;        /*indicates whether it is a idle partition task
+                                        0: no; 1: idle partition task
+                                        For each effetive cpu managed by partition, we create a
+                                        idle partition task.
+                                      */
+	int c_level;
+	int *c;
+	int c_real; //real time of the task,when c_level=1,c_real is c
+    int p;
+    struct partition_job*  my_job;      /*point to my job*/  
+	struct list_head partition_link;
+    int where;                      /*indicate current process is on active queue or expired queue
+                                          0-expired queue(Default)
+                                          1-active queue
+                                        */
+    unsigned long long nr_migration;
+#endif
+
 };
+
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
 #define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
@@ -2565,4 +2603,62 @@ static inline unsigned long rlimit_max(unsigned int limit)
 
 #endif /* __KERNEL__ */
 
+#ifdef CONFIG_SCHED_PARTITION_POLICY
+
+struct partition_para
+{
+    int period;
+    int idle_flag;//1:idle
+    int virtual_id;
+    int c_level;
+    int *c;
+    int padding __attribute__((aligned(64)));
+};
+
+struct partition_rq
+{
+    spinlock_t lock;
+	int ready;
+    int partition_cpu_tick; //it starts to be counted since cpu boot
+	struct list_head allocated_list;
+	struct list_head ready_list;
+	struct task_struct *curr;
+	struct partition_job *idle_partition_job;
+};
+
+struct partition_job
+{
+ 	unsigned long long release_time;
+    unsigned long long finish_time;
+    unsigned long long deadline;
+    unsigned long long next_release_time;
+    unsigned long long next_deadline;
+	int uti;//utilizition of the job,void using double,all the c*1000
+	volatile unsigned long long remaining_c;//indicate whether current job is done or not
+	struct list_head list;                  //the node itself used to be linked in the list head structure
+	struct task_struct *task;               //point to the partition task	
+};
+
+
+
+struct partition_scheduling 
+{
+	spinlock_t lock;
+	int total_num_cpu;
+	int partition_num_cpu;
+	int * cpu_bitmap;//标志当前cpu是否可以调度添加的任务
+	int turn_on;//signal of the partition scheduler,1:on 0:off
+	struct list_head partition_link_job;     //global job link,holding all jobs of partition jobs
+	struct list_head partition_order_link_job;//holding all the jobs by order utilization
+	struct list_head partition_idle_link_job;//global idle partition job link
+	
+	unsigned long long lcm;//the terminal point of the jobs 
+};
+//void init_partition_scheduling(void);
+//void init_partition_rq(struct partition_rq *partition_rq);
+//int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *pid, struct partition_para *para, int level);
+
 #endif
+
+#endif
+
