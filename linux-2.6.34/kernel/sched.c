@@ -9418,6 +9418,7 @@ int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *p
 		return -EFAULT;	
 	}
 	//srand((unsigned)(time(0)));
+	//for(i=0; i<num_partition_thread; i++)
 	for(i=0; i<num_partition_thread; i++)
 	{
 		kparam.level = level;
@@ -9459,7 +9460,8 @@ int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *p
 		{
 			retval = sched_setscheduler(p, SCHED_PARTITION, &kparam);
 			#ifdef PARTITION_DEBUG	
-			printk(KERN_ALERT "real_id:%d logical_id:%d",p->pid,p->partition_id);
+			//printk(KERN_ALERT "real_id:%d logical_id:%d",p->pid,p->partition_id);
+			printk(KERN_ALERT "sched_setscheduler end i:%d",i);
 			#endif
 			if(retval !=0)
 			{
@@ -9474,6 +9476,67 @@ int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *p
 	kfree(k_pid);
 	kfree(k_para);
 	return retval;
+}
+
+int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * pid)
+{
+	int i;
+	int retval;	
+	pid_t * array_pid;
+	struct partition_scheduling *partition_sched;
+	struct sched_param kparam;
+	struct task_struct *p;
+	struct rq *rq;
+	
+	#ifdef PARTITION_DEBUG	
+		printk(KERN_ALERT "partiton_to_normal start");
+	#endif
+	if(!pid || num_partition_thread <= 0)
+		return -EINVAL;
+	array_pid = (pid_t *)kmalloc(sizeof(pid_t) * num_partition_thread, GFP_KERNEL);
+	if(!array_pid) return -ENOMEM;
+	if(copy_from_user(array_pid, pid, sizeof(pid_t)*num_partition_thread))
+	{
+		kfree(array_pid);
+		return -EFAULT;
+	}
+
+	for(i=0; i<num_partition_thread; ++i)
+	{
+		rcu_read_lock();
+	    retval = -ESRCH;
+		printk(KERN_ALERT "partition_to_normal i:%d",i);
+	    p = find_process_by_pid(array_pid[i]);
+		if (p != NULL)
+	    {
+			kparam.sched_priority = 0 ;
+            retval = sched_setscheduler(p, SCHED_NORMAL, &kparam);
+			if(retval !=0 )
+			{ 
+				printk(KERN_ALERT "I am in if");
+            	rcu_read_unlock();
+            	kfree(array_pid);
+	    		return retval;
+            }
+		}
+		rcu_read_unlock();
+	}
+	printk(KERN_ALERT "I am out for");
+	for_each_possible_cpu(i)
+	{
+        rq = cpu_rq(i);
+        init_partition_rq(&rq->partition);
+    }
+	partition_sched = get_partition_scheduling();
+	spin_lock(&partition_sched->lock);      
+    re_ini_partition_scheduling(partition_sched);
+    spin_unlock(&partition_sched->lock);
+	kfree(array_pid);
+
+	#ifdef PARTITION_DEBUG	
+		printk(KERN_ALERT "partiton_to_normal end");
+	#endif
+    return retval;
 }
 
 int partition_num_online_cpus(void)
@@ -9543,7 +9606,7 @@ int partition_scheduler_start(void)
 /*	allocate_tasks_on_cpus
 	partiton调度算法，把所有partition任务按照cpu利用率分配到固定的cpu上
 */
-	//allocate_tasks_on_cpus(partition_sched);
+	allocate_tasks_on_cpus(partition_sched);
 	spin_unlock(&partition_sched->lock);
 	
 	mb();
@@ -9569,12 +9632,21 @@ int partition_scheduler_start(void)
 }
 int partition_current_tick(void)
 {
-	struct partition_scheduling *partition_sched;
+	struct partition_scheduling *p_sched;
 	p_sched =get_partition_scheduling();
 	return p_sched->lcm;
 }
-int partition_scheduler_end(void)
-{return 6;}
+int partition_scheduler_end(int num_partition_thread, pid_t *pid)
+{
+	int retval;
+	struct partition_scheduling *p_sched;
+	p_sched = get_partition_scheduling();
+	p_sched->turn_on = 0;
+	
+	//change RT-Fair scheduler to Fair scheduler
+    retval = do_sched_setscheduler_partition_to_normal(num_partition_thread, pid);
+	return 6;
+}
 asmlinkage long sys_partition_scheduler_prepare(int flag, int num_online_cpus, int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
 {
 	int retval;
@@ -9588,14 +9660,14 @@ asmlinkage long sys_partition_scheduler_prepare(int flag, int num_online_cpus, i
 	return retval;
 	
 }
-asmlinkage long sys_partition_scheduler_start_to_end(int flag)
+asmlinkage long sys_partition_scheduler_start_to_end(int flag, int num_online_cpus, int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
 {
 	int retval;
 	switch(flag)
 	{
 		case 1:{retval = partition_scheduler_start(); break;}
 		case 2:{retval = partition_current_tick(); break;}
-		case 3:{retval = partition_scheduler_end();break;}	
+		case 3:{retval = partition_scheduler_end(num_partition_thread, pid);break;}	
 		default:return -1;
 	}
 	return retval;

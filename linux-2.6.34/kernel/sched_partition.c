@@ -49,6 +49,24 @@ void init_partition_scheduling(void)
 	#endif
 }
 
+void re_ini_partition_scheduling(struct partition_scheduling *partition_sched)
+{
+	partition_sched->total_num_cpu = 0;
+	partition_sched->partition_num_cpu = 0;
+	if(partition_sched->cpu_bitmap != NULL)
+	{
+		kfree(partition_sched->cpu_bitmap);
+		partition_sched->cpu_bitmap = NULL;
+	}
+	partition_sched->cpu_bitmap = NULL;
+	partition_sched->turn_on = 0;
+	INIT_LIST_HEAD(&partition_sched->partition_link_job);
+	INIT_LIST_HEAD(&partition_sched->partition_order_link_job);
+	INIT_LIST_HEAD(&partition_sched->partition_idle_link_job);
+	
+	partition_sched->lcm = 0;
+}
+
 /*
  *initilize PARTITION_rq for each cpu, called by sched_init(void) in /kernel/sched.c when the system boots
  */
@@ -160,7 +178,7 @@ void print_idle_job_in_rq(struct partition_scheduling *p_sched)
 	struct list_head *ptr;
 	struct task_struct *idle_task;
 	struct rq *rq;
-	printk(KERN_ALERT "print_info in");
+	printk(KERN_ALERT "print_info idle_job");
 	for(i=0; i<p_sched->total_num_cpu;i++)
 	{
 		printk(KERN_ALERT "times:%d ",i);
@@ -171,8 +189,7 @@ void print_idle_job_in_rq(struct partition_scheduling *p_sched)
 			list_for_each(ptr,&rq->partition.ready_list)
 			{
 				idle_task = list_entry(ptr, struct task_struct, partition_link);
-				printk(KERN_ALERT "PARTITION:line:%d file:%s",__LINE__,__FILE__);
-				printk(KERN_ALERT "partition_id:%d,rq->cpu:%d ",idle_task->partition_id,rq->cpu);
+				printk(KERN_ALERT "idle_job info partition_id:%d,rq->cpu:%d ",idle_task->partition_id,rq->cpu);
 			}
 			
 		}
@@ -186,8 +203,7 @@ void print_link_job(struct partition_scheduling *p_sched)
 	{
 		job = list_entry(ptr, struct partition_job, list);
 		{
-			printk(KERN_ALERT "PARTITION:line:%d file:%s",__LINE__,__FILE__);
-			printk(KERN_ALERT "partition_id:%d ",job->task->partition_id);
+			printk(KERN_ALERT "not_idle_partition_id:%d ",job->task->partition_id);
 		}
 	}
 }
@@ -294,33 +310,37 @@ void print_order_list(struct partition_scheduling *p_sched)
 //排序所有的非空任务并放到partition_order_link_job队列中
 void order_link_job(struct partition_scheduling *p_sched)
 {
-	int flag,first=0;
+	int flag;
 	struct list_head *ptr_job;
 	struct list_head *ptr_order_job;
 	struct partition_job *job;//job from partition_link_job
 	struct partition_job *job_order;//job from partition_order_link_job
 	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "order_link_job start");
+	printk(KERN_ALERT "order_link_jobstart");
 	#endif
-	list_for_each(ptr_job, &p_sched->partition_link_job)
+	/*list_for_each(ptr_job, &p_sched->partition_link_job)
 	{
 		flag = 0;
+		printk(KERN_ALERT "order_link_jobstart1");
 		job = list_entry(ptr_job, struct partition_job, list);
-		if(first == 0)
+		printk(KERN_ALERT "order_link_jobstart2");
+		if(list_empty(&p_sched->partition_order_link_job))
 		{
+			printk(KERN_ALERT "order_link_jobstart3");
 			list_add_tail(&job->list, &p_sched->partition_order_link_job);
-			if(list_empty(&p_sched->partition_order_link_job))
-				printk(KERN_ALERT "partition_order_link_job is still empty,something is wrong");
-			first = 1;
-			mb();
+			//mb();
 		}		
 		else
 		{
+			printk(KERN_ALERT "order_link_jobstart4");
 			list_for_each(ptr_order_job, &p_sched->partition_order_link_job)
 			{
+				printk(KERN_ALERT "order_link_jobstart5");
 				job_order = list_entry(ptr_order_job, struct partition_job,list);
-				if(job->uti > job_order->uti)// 存在比当前uti小的节点，插入到比它小的节点的前面			
+				printk(KERN_ALERT "order_link_jobstart6");
+				if(1)//if(job->uti > job_order->uti)// 存在比当前uti小的节点，插入到比它小的节点的前面			
 				{
+					printk(KERN_ALERT "order_link_jobstart6");
 					list_add_tail(&job->list, &job_order->list);			
 					flag = 1;//标志存在比当前uti小的节点
 				}
@@ -328,8 +348,9 @@ void order_link_job(struct partition_scheduling *p_sched)
 			}
 			if(flag == 0)//不存在比当前uti小的节点，插入到队列尾部
 				list_add_tail(&job->list, &p_sched->partition_order_link_job);
+			printk(KERN_ALERT "order_link_jobstart7");
 		}
-	}
+	}*/
 	#ifdef PARTITION_DEBUG
 	printk(KERN_ALERT "order_link_job end");
 	#endif			
@@ -349,8 +370,10 @@ void allocate_tasks(struct partition_scheduling *p_sched)
 void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 {
 
+	printk(KERN_ALERT "allocate_tasks_on_cpus start");
 	order_link_job(p_sched);
 	allocate_tasks(p_sched);
+	printk(KERN_ALERT "allocate_task_on_cpus end");
 } 
 
 void update_data(struct rq *rq,unsigned long long time)
@@ -514,8 +537,8 @@ static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued
      //tick重要函数，待实现，tick处理都在这个函数中
 	struct partition_scheduling *p_sched;
 	p_sched =get_partition_scheduling();
-	if(p_sched->cpu_bitmap[rq->cpu])
-		printk(KERN_ALERT "idle is doing:%llu cpu:%d",p_sched->lcm,rq->cpu);
+	if(rq->cpu == 0)
+		p_sched->lcm++;
 
 	
 }
