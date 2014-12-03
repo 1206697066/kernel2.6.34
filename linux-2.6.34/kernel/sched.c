@@ -3765,20 +3765,20 @@ need_resched_nonpreemptible:
 	update_rq_clock(rq);
 	clear_tsk_need_resched(prev);
 	#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		if(partition_sched->turn_on && partition_sched->lcm < 40)
-			printk(KERN_ALERT "curr = prev, state:%ld,cpu:%d,pid:%d",prev->state,rq->cpu,rq->curr->pid);
+		//if(partition_sched->turn_on && partition_sched->lcm < 40)
+		//	printk(KERN_ALERT "curr = prev, state:%ld,cpu:%d,pid:%d",prev->state,rq->cpu,rq->curr->pid);
 	#endif
 	if (prev->state && !(preempt_count() & PREEMPT_ACTIVE)) { //state大于0代表prev也就是当前运行的任务不是running状态，并且没有标记 PREEMPT_ACTIVE，就表示当前的运行的任务没有必要停留在运行队列中了
 		if (unlikely(signal_pending_state(prev->state, prev))) //如果当前进程标记了状态是TASK_INTERRUPTIBLE，并且还有信号未处理，那么没有必要从运行队列中移除这个进程
 			prev->state = TASK_RUNNING;
 		else
 		#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		{
-			if(partition_sched->turn_on && partition_sched->lcm < 40)
-				printk(KERN_ALERT "task is delete from runqueue,curr id:%d,cpu:%d,pid:%d",rq->curr->partition_id,rq->cpu,rq->curr->pid);
+		//{
+		//	if(partition_sched->turn_on && partition_sched->lcm < 40)
+		//		printk(KERN_ALERT "task is delete from runqueue,curr id:%d,cpu:%d,pid:%d",rq->curr->partition_id,rq->cpu,rq->curr->pid);
 			deactivate_task(rq, prev, 1);
 			
-		}
+		//}
 		#endif	
 		switch_count = &prev->nvcsw;
 	}
@@ -3791,8 +3791,8 @@ need_resched_nonpreemptible:
 	put_prev_task(rq, prev);
 	next = pick_next_task(rq);
 	#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		if(partition_sched->turn_on && partition_sched->lcm < 40)
-			printk(KERN_ALERT "next state1:%ld,curr state:%ld,cpu:%d,curr pid:%d,next pid:%d",next->state,rq->curr->state,rq->cpu,rq->curr->pid,next->pid);
+		//if(partition_sched->turn_on && partition_sched->lcm < 40)
+			//printk(KERN_ALERT "next state1:%ld,curr state:%ld,cpu:%d,curr pid:%d,next pid:%d",next->state,rq->curr->state,rq->cpu,rq->curr->pid,next->pid);
 	#endif
 	if (likely(prev != next)) {
 		
@@ -3826,8 +3826,8 @@ need_resched_nonpreemptible:
 		cpu = smp_processor_id();
 		rq = cpu_rq(cpu);
 		#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		if(partition_sched->turn_on && partition_sched->lcm < 40)
-			printk(KERN_ALERT "prev state2:%ld,curr state2:%ld,next state2:%ld,cpu:%d,real id:%d",prev->state,rq->curr->state,next->state,rq->cpu,rq->curr->pid);
+		//if(partition_sched->turn_on && partition_sched->lcm < 40)
+		//	printk(KERN_ALERT "prev state2:%ld,curr state2:%ld,next state2:%ld,cpu:%d,real id:%d",prev->state,rq->curr->state,next->state,rq->cpu,rq->curr->pid);
 		#endif
 	} else
 		raw_spin_unlock_irq(&rq->lock);
@@ -3838,8 +3838,8 @@ need_resched_nonpreemptible:
 
 	if (unlikely(reacquire_kernel_lock(current) < 0)) {
 		#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		if(partition_sched->turn_on && partition_sched->lcm < 40)
-			printk(KERN_ALERT "got need_resched_nonpreemptible,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
+		//if(partition_sched->turn_on && partition_sched->lcm < 40)
+		//	printk(KERN_ALERT "got need_resched_nonpreemptible,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
 		#endif
 		prev = rq->curr;
 		switch_count = &prev->nivcsw;
@@ -3850,8 +3850,8 @@ need_resched_nonpreemptible:
 	if (need_resched())
 	{
 		#ifdef	CONFIG_SCHED_PARTITION_POLICY
-		if(partition_sched->turn_on && partition_sched->lcm < 40)
-			printk(KERN_ALERT "got need_resched,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
+		//if(partition_sched->turn_on && partition_sched->lcm < 40)
+		//	printk(KERN_ALERT "got need_resched,curr id:%d,cpu:%d",rq->curr->partition_id,rq->cpu);
 		#endif
 		goto need_resched;
 	}
@@ -4781,7 +4781,8 @@ recheck:
 			add_partition_idle_task_list(rq, p);
 		}
 		else
-			add_partition_task_list(rq, p);
+			//add_partition_task_list(rq, p);
+			add_partition_task_list_to_order(rq, p);
 		spin_unlock(&partition_sched->lock);
 		
 	}
@@ -9451,18 +9452,14 @@ int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *p
 		kparam.partition_id = k_para[i].virtual_id;
 		kparam.idle_flag = k_para[i].idle_flag;
 
-		#ifdef PARTITION_DEBUG
-		print_sched_kparam_of_job(num_partition_thread, kparam);
-		#endif
+		//#ifdef PARTITION_DEBUG
+		//print_sched_kparam_of_job(num_partition_thread, kparam);
+		//#endif
 		rcu_read_lock();
 		p = find_process_by_pid(k_pid[i]);
 		if(p != NULL)
 		{
 			retval = sched_setscheduler(p, SCHED_PARTITION, &kparam);
-			#ifdef PARTITION_DEBUG	
-			//printk(KERN_ALERT "real_id:%d logical_id:%d",p->pid,p->partition_id);
-			printk(KERN_ALERT "sched_setscheduler end i:%d",i);
-			#endif
 			if(retval !=0)
 			{
 				rcu_read_unlock();
@@ -9505,7 +9502,9 @@ int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * p
 	{
 		rcu_read_lock();
 	    retval = -ESRCH;
+		#ifdef PARTITION_DEBUG
 		printk(KERN_ALERT "partition_to_normal i:%d",i);
+		#endif
 	    p = find_process_by_pid(array_pid[i]);
 		if (p != NULL)
 	    {
@@ -9513,7 +9512,6 @@ int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * p
             retval = sched_setscheduler(p, SCHED_NORMAL, &kparam);
 			if(retval !=0 )
 			{ 
-				printk(KERN_ALERT "I am in if");
             	rcu_read_unlock();
             	kfree(array_pid);
 	    		return retval;
@@ -9521,7 +9519,6 @@ int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * p
 		}
 		rcu_read_unlock();
 	}
-	printk(KERN_ALERT "I am out for");
 	for_each_possible_cpu(i)
 	{
         rq = cpu_rq(i);
@@ -9553,7 +9550,9 @@ int partition_num_online_cpus(void)
 		rq = cpu_rq(i);
 		rq->partition.partition_cpu_tick = 0;
 	}
-	
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_num_online_cpus end");
+	#endif
     return retval;
 }
 int partition_set_cpu_affinity(int num_online_cpus)
@@ -9561,7 +9560,7 @@ int partition_set_cpu_affinity(int num_online_cpus)
 	int i;
 	struct partition_scheduling *partition_sched;
 	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "partition_set_cpu_affinifty start");
+	printk(KERN_ALERT "partition_set_cpu_affinity start");
 	#endif
 	partition_sched = get_partition_scheduling();
 	partition_sched->total_num_cpu = num_online_cpus;
@@ -9575,6 +9574,7 @@ int partition_set_cpu_affinity(int num_online_cpus)
 		
 	#ifdef PARTITION_DEBUG
 		printk(KERN_ALERT "total_num_cpu:%d  partition_num_cpu:%d",partition_sched->total_num_cpu,partition_sched->partition_num_cpu);
+		printk(KERN_ALERT "partition_set_cpu_affinity end");
 	#endif
 	return 0;
 }
@@ -9641,11 +9641,17 @@ int partition_scheduler_end(int num_partition_thread, pid_t *pid)
 	int retval;
 	struct partition_scheduling *p_sched;
 	p_sched = get_partition_scheduling();
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_scheduler_end start");
+	#endif
 	p_sched->turn_on = 0;
 	
 	//change RT-Fair scheduler to Fair scheduler
     retval = do_sched_setscheduler_partition_to_normal(num_partition_thread, pid);
-	return 6;
+	#ifdef PARTITION_DEBUG
+	printk(KERN_ALERT "partition_scheduler_end end");
+	#endif
+	return retval;
 }
 asmlinkage long sys_partition_scheduler_prepare(int flag, int num_online_cpus, int num_partition_thread, pid_t *pid, struct partition_para *para, int level)
 {

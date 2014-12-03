@@ -11,6 +11,7 @@
 
 void init_partition_job(struct partition_job *new_job, struct task_struct *p);
 void print_link_job(struct partition_scheduling *p_sched);
+void print_order_link_job(struct partition_scheduling *p_sched);
 
 struct partition_scheduling partition_sched;
 
@@ -86,7 +87,7 @@ void init_partition_rq(struct partition_rq *partition_rq)
 }
 
 /*把所有的非空任务添加到partition_sched结构体中的partiton_link_job中，在setpara中完成*/
-void add_partition_task_list(struct rq *rq, struct task_struct *p)
+/*void add_partition_task_list(struct rq *rq, struct task_struct *p)
 {
 	struct partition_job *new_job = NULL;
 	struct partition_scheduling *partition_sched = get_partition_scheduling();
@@ -97,6 +98,44 @@ void add_partition_task_list(struct rq *rq, struct task_struct *p)
 		list_add_tail(&new_job->list, &partition_sched->partition_link_job);
 		#ifdef PARTITION_DEBUG
 		printk(KERN_ALERT "add_partition_task_list");
+		#endif
+	}
+
+}*/
+
+/*把所有的非空任务添加到partition_sched结构体中的partiton_order_link_job中(按照利用率由高到低排序)，在setpara中完成*/
+void add_partition_task_list_to_order(struct rq *rq, struct task_struct *p)
+{
+	int flag = 0;
+	struct list_head *ptr;
+	struct partition_job *new_job = NULL;
+	struct partition_job *job;
+	struct partition_scheduling *partition_sched = get_partition_scheduling();
+	new_job = (struct partition_job *)kmalloc(sizeof(struct partition_job), GFP_KERNEL);
+	if( p && new_job)
+	{
+		init_partition_job(new_job, p);
+		//list_add_tail(&new_job->list, &partition_sched->partition_link_job);
+		if(!list_empty(&partition_sched->partition_order_link_job))
+		{
+			list_for_each(ptr, &partition_sched->partition_order_link_job)
+			{
+				job = list_entry(ptr, struct partition_job, list);
+				if(new_job->uti > job->uti)
+				{
+					flag = 1;
+					list_add_tail(&new_job->list, &job->list);
+					break;
+				}
+			}
+			if(flag == 0)
+				list_add_tail(&new_job->list, &partition_sched->partition_order_link_job);
+		}
+		else
+			list_add_tail(&new_job->list, &partition_sched->partition_order_link_job);
+
+		#ifdef PARTITION_DEBUG
+		printk(KERN_ALERT "add_partition_task_list_order");
 		#endif
 	}
 
@@ -111,9 +150,9 @@ void add_partition_idle_task_list(struct rq *rq, struct task_struct *p)
 	{
 		init_partition_job(new_job, p);
 		list_add_tail(&new_job->list, &partition_sched->partition_idle_link_job);
-		#ifdef PARTITION_DEBUG
-		printk(KERN_ALERT "add_partition_idle_task_list");
-		#endif
+		//#ifdef PARTITION_DEBUG
+		//printk(KERN_ALERT "add_partition_idle_task_list");
+		//#endif
 	}
 
 }
@@ -195,15 +234,17 @@ void print_idle_job_in_rq(struct partition_scheduling *p_sched)
 		}
 	}
 }
-void print_link_job(struct partition_scheduling *p_sched)
+
+
+void print_order_link_job(struct partition_scheduling *p_sched)
 {
 	struct list_head *ptr;
 	struct partition_job *job;
-	list_for_each(ptr, &p_sched->partition_link_job)
+	list_for_each(ptr, &p_sched->partition_order_link_job)
 	{
 		job = list_entry(ptr, struct partition_job, list);
 		{
-			printk(KERN_ALERT "not_idle_partition_id:%d ",job->task->partition_id);
+			printk(KERN_ALERT "not_idle_partition_id:%d uti:%d",job->task->partition_id,job->uti);
 		}
 	}
 }
@@ -246,121 +287,9 @@ void allocate_idle_tasks_on_cpus(struct partition_scheduling *p_sched)
 	#ifdef PARTITION_DEBUG
 	printk(KERN_ALERT "allocate_idle_tasks_on_cpus end");
 	print_idle_job_in_rq(p_sched);//输出idle任务信息
-	print_link_job(p_sched);//输出partittion_scheduling中非空任务信息
+	print_order_link_job(p_sched);//按序输出partittion_scheduling中非空任务信息
 	#endif
 }
-
-void allocate_idle_tasks_on_cpus_change(struct partition_scheduling *p_sched)
-{
-	int i;
-	struct list_head *ptr;
-	struct partition_job *job;
-	struct rq *src_rq;
-	struct rq *des_rq;
-	int cpu;
-	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "allocate_idle_tasks_on_cpus_change start");
-	#endif	
-	cpu = 1,i=0;
-	list_for_each(ptr, &p_sched->partition_idle_link_job)
-	{
-		if(i == 1)
-		{
-			job = list_entry(ptr, struct partition_job, list);
-			src_rq = task_rq(job->task);
-			des_rq = cpu_rq(cpu);
-			if(src_rq != des_rq)
-			{   
-				printk(KERN_ALERT "src_rq != des_rq");
-		        while( task_running(src_rq, job->task) )
-				{
-		        	mb();
-		        }
-				deactivate_task(src_rq, job->task, 0);
-				set_task_cpu(job->task, des_rq->cpu);//设置任务在指定cpu上运行
-				activate_task(des_rq, job->task, 0);
-		    }
-			else
-			{
-				printk(KERN_ALERT "src_rq == des_rq");
-				//deactivate_task(src_rq, job->task, 0);
-				//set_task_cpu(job->task, des_rq->cpu);//设置任务在指定cpu上运行
-				activate_task(des_rq, job->task, 0);
-			}
-		}
-		i++;
-	}
-	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "allocate_idle_tasks_on_cpus_change end");
-	print_idle_job_in_rq(p_sched);//输出idle任务信息
-	#endif
-}
-
-void print_order_list(struct partition_scheduling *p_sched)
-{
-	struct list_head *ptr;
-	struct partition_job *job;
-	printk(KERN_ALERT "uti of the job in order:");
-	list_for_each(ptr, &p_sched->partition_order_link_job)
-	{
-		job = list_entry(ptr, struct partition_job, list);
-		printk(KERN_ALERT "uti:%d ",job->uti);
-	}	
-}
-//排序所有的非空任务并放到partition_order_link_job队列中
-void order_link_job(struct partition_scheduling *p_sched)
-{
-	int flag;
-	struct list_head *ptr_job;
-	struct list_head *ptr_order_job;
-	struct partition_job *job;//job from partition_link_job
-	struct partition_job *job_order;//job from partition_order_link_job
-	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "order_link_jobstart");
-	#endif
-	/*list_for_each(ptr_job, &p_sched->partition_link_job)
-	{
-		flag = 0;
-		printk(KERN_ALERT "order_link_jobstart1");
-		job = list_entry(ptr_job, struct partition_job, list);
-		printk(KERN_ALERT "order_link_jobstart2");
-		if(list_empty(&p_sched->partition_order_link_job))
-		{
-			printk(KERN_ALERT "order_link_jobstart3");
-			list_add_tail(&job->list, &p_sched->partition_order_link_job);
-			//mb();
-		}		
-		else
-		{
-			printk(KERN_ALERT "order_link_jobstart4");
-			list_for_each(ptr_order_job, &p_sched->partition_order_link_job)
-			{
-				printk(KERN_ALERT "order_link_jobstart5");
-				job_order = list_entry(ptr_order_job, struct partition_job,list);
-				printk(KERN_ALERT "order_link_jobstart6");
-				if(1)//if(job->uti > job_order->uti)// 存在比当前uti小的节点，插入到比它小的节点的前面			
-				{
-					printk(KERN_ALERT "order_link_jobstart6");
-					list_add_tail(&job->list, &job_order->list);			
-					flag = 1;//标志存在比当前uti小的节点
-				}
-				mb();	
-			}
-			if(flag == 0)//不存在比当前uti小的节点，插入到队列尾部
-				list_add_tail(&job->list, &p_sched->partition_order_link_job);
-			printk(KERN_ALERT "order_link_jobstart7");
-		}
-	}*/
-	#ifdef PARTITION_DEBUG
-	printk(KERN_ALERT "order_link_job end");
-	#endif			
-	printk(KERN_ALERT "PARTITION:line:%d file:%s",__LINE__,__FILE__);
-	#ifdef PARTITION_DEBUG
-	print_order_list(p_sched);
-	#endif
-	
-}
-
 
 void allocate_tasks(struct partition_scheduling *p_sched)
 {
@@ -371,7 +300,6 @@ void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 {
 
 	printk(KERN_ALERT "allocate_tasks_on_cpus start");
-	order_link_job(p_sched);
 	allocate_tasks(p_sched);
 	printk(KERN_ALERT "allocate_task_on_cpus end");
 } 
@@ -395,7 +323,7 @@ static void dequeue_task_partition(struct rq *rq, struct task_struct *p, int sle
 struct task_struct *get_next_task_partition(struct rq *rq,struct partition_scheduling *p_sched)
 {
 	struct list_head *ptr;
-	struct rq *src_rq;
+	struct rq *src_rq = NULL;
 	struct task_struct *idle_task = NULL;
 	spin_lock(&rq->partition.lock);
 	list_for_each(ptr,&rq->partition.ready_list)
@@ -433,28 +361,6 @@ struct task_struct *get_next_task_partition(struct rq *rq,struct partition_sched
 	return idle_task;
 }
 
-/*struct task_struct *get_curr(struct rq *rq,struct partition_scheduling *p_sched)
-{
-	int i;
-	int cpu;
-	struct list_head *ptr;
-	struct rq *src_rq;
-	struct task_struct *idle_task = NULL;
-	spin_lock(&rq->partition.lock);
-	list_for_each(ptr,&rq->partition.ready_list)
-	{
-			idle_task = list_entry(ptr, struct task_struct, partition_link);
-			if(idle_task != NULL)
-			{
-				printk(KERN_ALERT "PARTITION:line:%d file:%s",__LINE__,__FILE__);
-				printk(KERN_ALERT "list is not empty  partition_id:%d,rq->cpu:%d ,lcm:%llu",idle_task->partition_id,rq->cpu,p_sched->lcm);
-			}
-			else
-				printk(KERN_ALERT "idle_task is NULL");		
-	}
-	spin_unlock(&rq->partition.lock);
-	return idle_task;
-}*/
 static struct task_struct* pick_next_task_partition(struct rq *rq)
 {
 	struct list_head *ptr;
@@ -487,49 +393,6 @@ static struct task_struct* pick_next_task_partition(struct rq *rq)
 	}
 	else
 		return NULL;
-	/*debug code
-	struct list_head *ptr;
-	struct task_struct *idle_task;
-	struct partition_scheduling *p_sched;
-	idle_task = NULL;
-	p_sched = get_partition_scheduling();
-	if(p_sched->turn_on)
-	{
-		if(p_sched->cpu_bitmap[rq->cpu])
-		{
-			(p_sched->lcm)++;
-			if(p_sched->lcm < 40)
-				printk(KERN_ALERT "I am IN,cpu:%d",rq->cpu);
-			spin_lock(&rq->partition.lock);
-			if(!list_empty(&rq->partition.ready_list) && p_sched->lcm <40)
-			{
-				list_for_each(ptr,&rq->partition.ready_list)
-				{
-					idle_task = list_entry(ptr, struct task_struct, partition_link);
-					rq->partition.curr = idle_task;
-					printk(KERN_ALERT "list is not empty curr id:%d partition_id:%d,rq->cpu:%d ,lcm:%llu,state:%d",rq->curr->pid,idle_task->partition_id,rq->cpu,p_sched->lcm,idle_task->state);		
-				}
-			}
-			if(list_empty(&rq->partition.ready_list) && p_sched->lcm <40)
-			{
-				printk(KERN_ALERT "list is empty,curr id:%d,partition_id:%d,cpu:%d,state:%d",rq->curr->pid,rq->curr->partition_id,rq->cpu,rq->curr->state);
-				list_add_tail(&rq->partition.idle_partition_job->task->partition_link, &rq->partition.ready_list);
-				idle_task = NULL;
-			}	
-			spin_unlock(&rq->partition.lock);
-			return idle_task;		
-		}
-		else
-		{
-			if(p_sched->lcm <40)
-				printk(KERN_ALERT "normal_pick_next rq->cpu:%d lcm:%llu",rq->cpu,p_sched->lcm);
-			return NULL;
-		}
-	}
-	else
-		return NULL;
-	*/
-	
 }
 
 static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued)
