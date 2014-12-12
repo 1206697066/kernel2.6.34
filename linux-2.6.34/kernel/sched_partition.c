@@ -5,6 +5,8 @@
 #include <linux/cpuset.h>
 #include <linux/percpu.h>
 
+#define T 1000 //uti扩大的倍数，因为内核不能运算浮点数，所以把利用率扩大
+
 #ifndef PARTITION_DEBUG
 #define PARTITION_DEBUG
 #endif
@@ -164,9 +166,10 @@ void init_partition_job(struct partition_job *new_job, struct task_struct *p)
 	new_job->deadline = 0;
 	new_job->next_release_time = 0;
 	new_job->next_deadline = 0;
-	
-	new_job->uti = (p->c_real)*1000 / (p->p);
-	//new_job->uti = (double)3/(double)5;
+	if(p->idle_flag == 0)//非空任务
+		new_job->uti = (p->c_real)*T / (p->p);
+	else
+		new_job->uti = 1;
 	new_job->remaining_c = new_job->task->c_real;
 	INIT_LIST_HEAD(&new_job->list);
 	INIT_LIST_HEAD(&p->partition_link);
@@ -291,16 +294,105 @@ void allocate_idle_tasks_on_cpus(struct partition_scheduling *p_sched)
 	#endif
 }
 
+void init_cpu_uti(int *cpu_uti, struct partition_scheduling *p_sched)
+{
+	int i;
+	for(i=0; i<p_sched->partition_num_cpu; ++i)
+		cpu_uti[i] = 0;
+}
+
+int get_lowest_uti_cpu(int *cpu_uti, struct partition_scheduling *p_sched)
+{
+	int i;
+	int num_cpu = 0;
+	int uti_lowest = cpu_uti[0];
+	for(i=1; i<p_sched->partition_num_cpu; ++i)
+	{
+		if(cpu_uti[i] == 0)
+			return i;
+		if(cpu_uti[i] < uti_lowest)
+		{
+			uti_lowest = cpu_uti[i];
+			num_cpu = i;
+		}
+	}
+	return num_cpu;
+}
+
+void allocte_task_on_cpu_rq_in_order(struct rq *rq, struct partition_job *job)
+{
+	struct list_head *ptr;
+	struct task_struct *p;
+	list_for_each(ptr, &rq->partition.ready_list)
+	{
+		p = list_entry(ptr, struct task_struct, partition_link);
+		if(job->remaining_c < p->my_job->remaining_c)
+		{
+			list_add_tail(&job->task->partition_link, &p->partition_link);
+			break;
+		}
+	}
+}
+
 void allocate_tasks(struct partition_scheduling *p_sched)
 {
-		
+	struct rq *rq;
+	struct list_head *ptr;
+	struct partition_job *job;
+	int *cpu_uti;//记录每个cpu的利用率
+	int cpu_which;//返回的利用率最低的cpu
+	cpu_uti = (int *)kmalloc(sizeof(int) * p_sched->partition_num_cpu,GFP_KERNEL);
+	if(!cpu_uti)
+		return; 
+	init_cpu_uti(cpu_uti,p_sched);
+	list_for_each(ptr,&p_sched->partition_order_link_job)
+	{
+		job = list_entry(ptr, struct partition_job, list);
+		cpu_which = get_lowest_uti_cpu(cpu_uti, p_sched);//获取执行partition任务利用率最低的cpu
+		rq = cpu_rq(cpu_which);
+		allocte_task_on_cpu_rq_in_order(rq,job);//把此job按执行顺寻添加到对应rq的ready_list中
+		cpu_uti[cpu_which]+=job->uti;
+	}
+	
+	
 }
+
+void print_tasks_on_each_cpu(struct partition_scheduling *p_sched)
+{
+	int firstcpu,nextcpu;
+	struct list_head *ptr;
+	struct rq *rq;
+	struct task_struct *p;
+	firstcpu = get_first_partition_cpu(p_sched);
+	rq = cpu_rq(firstcpu);
+	printk(KERN_ALERT "cpu%d的任务队列",firstcpu);
+	list_for_each(ptr, &rq->partition.ready_list)
+	{
+		p = list_entry(ptr, struct task_struct, partition_link);
+		printk(KERN_ALERT "uti:%d remaining_c:%llu",p->my_job->uti,p->my_job->remaining_c);
+	}
+	nextcpu = next_cpu_rt_fair(firstcpu, p_sched);
+	while(nextcpu != firstcpu)
+	{
+		rq = cpu_rq(nextcpu);
+		printk(KERN_ALERT "cpu%d的任务队列",nextcpu);
+		list_for_each(ptr, &rq->partition.ready_list)
+		{
+			p = list_entry(ptr, struct task_struct, partition_link);
+			printk(KERN_ALERT "uti:%d remaining_c:%llu",p->my_job->uti,p->my_job->remaining_c);
+		}
+		nextcpu = next_cpu_rt_fair(nextcpu, p_sched);
+	}
+}
+
 //按照cpu利用率排序非空任务，并分配给固定的cpu
 void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 {
 
 	printk(KERN_ALERT "allocate_tasks_on_cpus start");
-	allocate_tasks(p_sched);
+	allocate_tasks(p_sched);//按着WFD算法分配任务到各个cpu上
+	printk("tasks on each cpu");
+	print_tasks_on_each_cpu(p_sched);
 	printk(KERN_ALERT "allocate_task_on_cpus end");
 } 
 
