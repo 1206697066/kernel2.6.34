@@ -63,6 +63,7 @@ void re_ini_partition_scheduling(struct partition_scheduling *partition_sched)
 	}
 	partition_sched->cpu_bitmap = NULL;
 	partition_sched->turn_on = 0;
+	partition_sched->activate_flag = 0;//默认加入队尾
 	INIT_LIST_HEAD(&partition_sched->partition_link_job);
 	INIT_LIST_HEAD(&partition_sched->partition_order_link_job);
 	INIT_LIST_HEAD(&partition_sched->partition_idle_link_job);
@@ -78,9 +79,10 @@ void init_partition_rq(struct partition_rq *partition_rq)
 {
 	spin_lock_init(&partition_rq->lock);
 	partition_rq->ready = 0;
+	//partition_rq->partition_cpu_tick = 0;
 	partition_rq->curr= NULL;
 	partition_rq->idle_partition_job = NULL;
-	INIT_LIST_HEAD(&partition_rq->allocated_list);
+	INIT_LIST_HEAD(&partition_rq->expired_list);
 	INIT_LIST_HEAD(&partition_rq->ready_list);
 	#ifdef PARTITION_DEBUG
         printk(KERN_ALERT "init_partition_rq\n");
@@ -321,17 +323,20 @@ int get_lowest_uti_cpu(int *cpu_uti, struct partition_scheduling *p_sched)
 
 void allocte_task_on_cpu_rq_in_order(struct rq *rq, struct partition_job *job)
 {
-	struct list_head *ptr;
-	struct task_struct *p;
-	list_for_each(ptr, &rq->partition.ready_list)
-	{
-		p = list_entry(ptr, struct task_struct, partition_link);
-		if(job->remaining_c < p->my_job->remaining_c)
+	struct rq *src_rq;
+	struct rq *des_rq;
+	src_rq = task_rq(job->task);
+	des_rq = rq;
+	if(src_rq != des_rq)
+	{       
+        while( task_running(src_rq, job->task) )
 		{
-			list_add_tail(&job->task->partition_link, &p->partition_link);
-			break;
-		}
-	}
+            mb();
+        }
+    }
+	deactivate_task(src_rq, job->task, 0);
+    set_task_cpu(job->task, des_rq->cpu);//设置任务在指定cpu上运行
+	activate_task(des_rq, job->task, 0);
 }
 
 void allocate_tasks(struct partition_scheduling *p_sched)
@@ -345,6 +350,7 @@ void allocate_tasks(struct partition_scheduling *p_sched)
 	if(!cpu_uti)
 		return; 
 	init_cpu_uti(cpu_uti,p_sched);
+	p_sched->activate_flag = 1;
 	list_for_each(ptr,&p_sched->partition_order_link_job)
 	{
 		job = list_entry(ptr, struct partition_job, list);
@@ -398,13 +404,31 @@ void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 
 void update_data(struct rq *rq,unsigned long long time)
 {
-
+	
 }
 
-static void enqueue_task_partition(struct rq *rq, struct task_struct *p, int wakeup, bool head){
-     
+static void enqueue_task_partition(struct rq *rq, struct task_struct *p, int wakeup, bool head)
+{  
      // 待实现
-	list_add_tail(&p->partition_link, &rq->partition.ready_list);
+	struct list_head *ptr;
+	struct task_struct *p_compare;
+	struct partition_scheduling *p_sched;
+	p_sched = get_partition_scheduling();
+	printk(KERN_ALERT "flag:%d",p_sched->activate_flag);
+	if(p_sched->activate_flag == 0)//加入队列的尾部，一般情况
+		list_add_tail(&p->partition_link, &rq->partition.ready_list);
+	else//flag=1,按照remaining_c从小到大加入队列
+	{
+		list_for_each(ptr, &rq->partition.ready_list)
+		{
+			p_compare = list_entry(ptr, struct task_struct, partition_link);
+			if(p->my_job->remaining_c < p_compare->my_job->remaining_c)
+			{
+				list_add_tail(&p->partition_link, &p_compare->partition_link);
+				break;
+			}
+		}
+	}
 }
 
 static void dequeue_task_partition(struct rq *rq, struct task_struct *p, int sleep){
@@ -462,22 +486,27 @@ static struct task_struct* pick_next_task_partition(struct rq *rq)
 	p_sched = get_partition_scheduling();
 	if(p_sched->turn_on)
 	{
-		if(p_sched->cpu_bitmap[rq->cpu])
+		if(p_sched->cpu_bitmap[rq->cpu] && rq->partition.ready)
 		{
+			//if(rq->partition.curr == NULL)
+			//	rq->partition.curr = get_next_task_partition(rq, p_sched);
 			spin_lock(&rq->partition.lock);
 			if(!list_empty(&rq->partition.ready_list))
 			{
 				list_for_each(ptr,&rq->partition.ready_list)
 				{
 					idle_task = list_entry(ptr, struct task_struct, partition_link);
-					rq->partition.curr = idle_task;		
+					break;
 				}
-			}
+			}	
 			if(list_empty(&rq->partition.ready_list))
 			{
-				idle_task = NULL;
-			}	
+ 				idle_task = NULL;
+  			}
 			spin_unlock(&rq->partition.lock);
+			if(idle_task != NULL)
+				if(p_sched->lcm < 50)
+					printk(KERN_ALERT "cpu%d id:%d ",rq->cpu,idle_task->partition_id);
 			return idle_task;		
 		}
 		else
@@ -492,6 +521,7 @@ static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued
      //tick重要函数，待实现，tick处理都在这个函数中
 	struct partition_scheduling *p_sched;
 	p_sched =get_partition_scheduling();
+	//rq->partition.partition_cpu_tick++;
 	if(rq->cpu == 0)
 		p_sched->lcm++;
 

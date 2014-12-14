@@ -2620,8 +2620,8 @@ struct partition_rq
     spinlock_t lock;
 	int ready;
     int partition_cpu_tick; //it starts to be counted since cpu boot
-	struct list_head allocated_list;
-	struct list_head ready_list;
+	struct list_head expired_list;//运行结束的task队列
+	struct list_head ready_list;//待运行和正在运行的任务队列
 	struct task_struct *curr;
 	struct partition_job *idle_partition_job;
 };
@@ -2646,6 +2646,9 @@ struct partition_scheduling
 	spinlock_t lock;
 	int total_num_cpu;
 	int partition_num_cpu;
+	int activate_flag;//选择使用哪一个enqueue方法，在文件sched_partition.c中的函数enqueue_task_partition中使用
+					  //0：activate_task中方法enqueue_task加入队尾
+					  //1：activate_task中方法enqueue_task按照remaining_c排序加入
 	int * cpu_bitmap;//标志当前cpu是否可以调度添加的任务
 	int turn_on;//signal of the partition scheduler,1:on 0:off
 	struct list_head partition_link_job;     //global job link,holding all jobs of partition jobs

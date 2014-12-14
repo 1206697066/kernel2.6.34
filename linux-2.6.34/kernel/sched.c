@@ -9424,7 +9424,7 @@ int do_sched_setscheduler_normal_to_partition(int num_partition_thread, pid_t *p
 	{
 		kparam.level = level;
 		kparam.sched_priority = 0;
-		if(level == 1)//all the job are level 1,LEVEL = 1
+		if(level == 1)//for now,all the jobs are level 1,LEVEL = 1
 		{
 			kparam.c_level = 1;
 			kparam.c_real = k_para[i].c[0];
@@ -9638,16 +9638,29 @@ int partition_current_tick(void)
 }
 int partition_scheduler_end(int num_partition_thread, pid_t *pid)
 {
+	int i;
 	int retval;
+	struct rq *rq;
 	struct partition_scheduling *p_sched;
 	p_sched = get_partition_scheduling();
 	#ifdef PARTITION_DEBUG
 	printk(KERN_ALERT "partition_scheduler_end start");
 	#endif
 	p_sched->turn_on = 0;
-	
 	//change RT-Fair scheduler to Fair scheduler
     retval = do_sched_setscheduler_partition_to_normal(num_partition_thread, pid);
+	for(i=0; i<p_sched->total_num_cpu; i++)
+	{
+		if(p_sched->cpu_bitmap[i])
+		{
+			rq = cpu_rq(i);	
+			rq->partition.ready = 0;
+			printk(KERN_ALERT "cpu%d tick:%d",i,rq->partition.partition_cpu_tick);
+			mb();
+			resched_cpu(i);	
+		}
+		
+	}
 	#ifdef PARTITION_DEBUG
 	printk(KERN_ALERT "partition_scheduler_end end");
 	#endif
