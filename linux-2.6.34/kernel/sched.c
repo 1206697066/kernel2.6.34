@@ -3557,7 +3557,7 @@ void scheduler_tick(void)
 #endif
 
 #ifdef CONFIG_SCHED_PARTITION_POLICY
-	rq->partition.partition_cpu_tick++;
+	//rq->partition.partition_cpu_tick++;
 	if(curr->policy == SCHED_PARTITION)
 		update_data(rq, end-start);
 	mb();
@@ -9522,9 +9522,11 @@ int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * p
 	for_each_possible_cpu(i)
 	{
         rq = cpu_rq(i);
+		printk(KERN_ALERT "cpu%d tick:%d",i,rq->partition.partition_cpu_tick);
         init_partition_rq(&rq->partition);
     }
 	partition_sched = get_partition_scheduling();
+	printk(KERN_ALERT "lcm:%llu sched_clock:%llu",partition_sched->lcm,sched_clock());
 	spin_lock(&partition_sched->lock);      
     re_ini_partition_scheduling(partition_sched);
     spin_unlock(&partition_sched->lock);
@@ -9604,9 +9606,14 @@ int partition_scheduler_start(void)
 */
 	allocate_idle_tasks_on_cpus(partition_sched);
 /*	allocate_tasks_on_cpus
-	partiton调度算法，把所有partition任务按照cpu利用率分配到固定的cpu上
+	partiton调度算法，把所有partition任务按照cpu利用率分配到固定的cpu上(WFD算法)
 */
 	allocate_tasks_on_cpus(partition_sched);
+/*	
+	init_ready_job_on_partition_rq
+	初始化tick=0时的任务信息，此时所有任务都在ready_list上,给release_time等数据赋值
+*/
+	init_ready_job_on_partition_rq(partition_sched);
 	spin_unlock(&partition_sched->lock);
 	
 	mb();
@@ -9647,20 +9654,8 @@ int partition_scheduler_end(int num_partition_thread, pid_t *pid)
 	printk(KERN_ALERT "partition_scheduler_end start");
 	#endif
 	p_sched->turn_on = 0;
-	//change RT-Fair scheduler to Fair scheduler
+	//change partition scheduler to Fair scheduler
     retval = do_sched_setscheduler_partition_to_normal(num_partition_thread, pid);
-	for(i=0; i<p_sched->total_num_cpu; i++)
-	{
-		if(p_sched->cpu_bitmap[i])
-		{
-			rq = cpu_rq(i);	
-			rq->partition.ready = 0;
-			printk(KERN_ALERT "cpu%d tick:%d",i,rq->partition.partition_cpu_tick);
-			mb();
-			resched_cpu(i);	
-		}
-		
-	}
 	#ifdef PARTITION_DEBUG
 	printk(KERN_ALERT "partition_scheduler_end end");
 	#endif

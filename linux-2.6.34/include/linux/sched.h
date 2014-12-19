@@ -2620,6 +2620,7 @@ struct partition_rq
     spinlock_t lock;
 	int ready;
     int partition_cpu_tick; //it starts to be counted since cpu boot
+	int tail_flag;
 	struct list_head expired_list;//运行结束的task队列
 	struct list_head ready_list;//待运行和正在运行的任务队列
 	struct task_struct *curr;

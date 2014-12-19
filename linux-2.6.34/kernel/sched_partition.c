@@ -79,7 +79,8 @@ void init_partition_rq(struct partition_rq *partition_rq)
 {
 	spin_lock_init(&partition_rq->lock);
 	partition_rq->ready = 0;
-	//partition_rq->partition_cpu_tick = 0;
+	partition_rq->partition_cpu_tick = 0;
+	partition_rq->tail_flag = 0;
 	partition_rq->curr= NULL;
 	partition_rq->idle_partition_job = NULL;
 	INIT_LIST_HEAD(&partition_rq->expired_list);
@@ -350,7 +351,7 @@ void allocate_tasks(struct partition_scheduling *p_sched)
 	if(!cpu_uti)
 		return; 
 	init_cpu_uti(cpu_uti,p_sched);
-	p_sched->activate_flag = 1;
+	p_sched->activate_flag = 1;//flag=1,任务按序进队列
 	list_for_each(ptr,&p_sched->partition_order_link_job)
 	{
 		job = list_entry(ptr, struct partition_job, list);
@@ -375,7 +376,7 @@ void print_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 	list_for_each(ptr, &rq->partition.ready_list)
 	{
 		p = list_entry(ptr, struct task_struct, partition_link);
-		printk(KERN_ALERT "uti:%d remaining_c:%llu",p->my_job->uti,p->my_job->remaining_c);
+		printk(KERN_ALERT "uti:%d remaining_c:%llu pid:%d partition_id:%d",p->my_job->uti,p->my_job->remaining_c,p->pid,p->partition_id);
 	}
 	nextcpu = next_cpu_rt_fair(firstcpu, p_sched);
 	while(nextcpu != firstcpu)
@@ -385,8 +386,44 @@ void print_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 		list_for_each(ptr, &rq->partition.ready_list)
 		{
 			p = list_entry(ptr, struct task_struct, partition_link);
-			printk(KERN_ALERT "uti:%d remaining_c:%llu",p->my_job->uti,p->my_job->remaining_c);
+			printk(KERN_ALERT "uti:%d remaining_c:%llu pid:%d partition_id:%d",p->my_job->uti,p->my_job->remaining_c,p->pid,p->partition_id);
 		}
+		nextcpu = next_cpu_rt_fair(nextcpu, p_sched);
+	}
+}
+
+void print_expired_tasks_on_each_cpu(struct partition_scheduling *p_sched)
+{
+	int firstcpu,nextcpu;
+	struct list_head *ptr;
+	struct rq *rq;
+	struct task_struct *p;
+	firstcpu = get_first_partition_cpu(p_sched);
+	rq = cpu_rq(firstcpu);
+	printk(KERN_ALERT "cpu%d的expired队列",firstcpu);
+	if(!list_empty(&rq->partition.expired_list))
+		list_for_each(ptr, &rq->partition.expired_list)
+		{
+			p = list_entry(ptr, struct task_struct, partition_link);
+			printk(KERN_ALERT "release_time:%llu",p->my_job->release_time);
+		}
+	else
+	{
+		printk(KERN_ALERT "list is empty");
+	}
+	nextcpu = next_cpu_rt_fair(firstcpu, p_sched);
+	while(nextcpu != firstcpu)
+	{
+		rq = cpu_rq(nextcpu);
+		printk(KERN_ALERT "cpu%d的expired队列",nextcpu);
+		if(!list_empty(&rq->partition.expired_list))
+			list_for_each(ptr, &rq->partition.expired_list)
+			{
+				p = list_entry(ptr, struct task_struct, partition_link);
+				printk(KERN_ALERT "release_time:%llu",p->my_job->release_time);
+			}
+		else
+			printk(KERN_ALERT "list is empty");
 		nextcpu = next_cpu_rt_fair(nextcpu, p_sched);
 	}
 }
@@ -402,6 +439,30 @@ void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 	printk(KERN_ALERT "allocate_task_on_cpus end");
 } 
 
+//初始化ready_list上的任务，release_time,next_release_time
+void init_ready_job_on_partition_rq(struct partition_scheduling *p_sched)
+{
+	int i;
+	struct rq *rq;
+	struct list_head *ptr;
+	struct task_struct *p;
+	for(i=0; i<p_sched->total_num_cpu; i++)
+	{
+		if(p_sched->cpu_bitmap[i])
+		{
+			rq = cpu_rq(i);
+			list_for_each(ptr, &rq->partition.ready_list)
+			{
+				p = list_entry(ptr, struct task_struct, partition_link);
+				p->my_job->release_time = rq->partition.partition_cpu_tick;
+				//p->my_job->remaining_c = p->c;//之前已被初始化,无需再初始化
+				p->my_job->next_release_time = p->my_job->release_time + p->p;
+			}
+		}
+		
+	}
+}
+
 void update_data(struct rq *rq,unsigned long long time)
 {
 	
@@ -414,7 +475,7 @@ static void enqueue_task_partition(struct rq *rq, struct task_struct *p, int wak
 	struct task_struct *p_compare;
 	struct partition_scheduling *p_sched;
 	p_sched = get_partition_scheduling();
-	printk(KERN_ALERT "flag:%d",p_sched->activate_flag);
+	printk(KERN_ALERT "enqueue_task_partition activate_flag:%d cpu:%d",p_sched->activate_flag,rq->cpu);
 	if(p_sched->activate_flag == 0)//加入队列的尾部，一般情况
 		list_add_tail(&p->partition_link, &rq->partition.ready_list);
 	else//flag=1,按照remaining_c从小到大加入队列
@@ -488,8 +549,6 @@ static struct task_struct* pick_next_task_partition(struct rq *rq)
 	{
 		if(p_sched->cpu_bitmap[rq->cpu] && rq->partition.ready)
 		{
-			//if(rq->partition.curr == NULL)
-			//	rq->partition.curr = get_next_task_partition(rq, p_sched);
 			spin_lock(&rq->partition.lock);
 			if(!list_empty(&rq->partition.ready_list))
 			{
@@ -499,14 +558,10 @@ static struct task_struct* pick_next_task_partition(struct rq *rq)
 					break;
 				}
 			}	
-			if(list_empty(&rq->partition.ready_list))
-			{
- 				idle_task = NULL;
-  			}
 			spin_unlock(&rq->partition.lock);
-			if(idle_task != NULL)
-				if(p_sched->lcm < 50)
-					printk(KERN_ALERT "cpu%d id:%d ",rq->cpu,idle_task->partition_id);
+			//if(idle_task != NULL)
+			//	if(p_sched->lcm < 50)
+			//		printk(KERN_ALERT "cpu%d id:%d ",rq->cpu,idle_task->partition_id);
 			return idle_task;		
 		}
 		else
@@ -516,15 +571,127 @@ static struct task_struct* pick_next_task_partition(struct rq *rq)
 		return NULL;
 }
 
+void add_task_to_expired_by_release_time(struct rq *rq, struct task_struct *p)
+{
+	struct list_head *ptr;
+	struct task_struct *order_p;
+	rq->partition.tail_flag = 0;
+	if(list_empty(&rq->partition.expired_list))
+		list_add_tail(&p->partition_link, &rq->partition.expired_list);
+	else
+	{
+		list_for_each(ptr, &rq->partition.expired_list)
+		{
+			order_p = list_entry(ptr, struct task_struct, partition_link);
+			if(p->my_job->release_time < order_p->my_job->release_time)
+			{
+				rq->partition.tail_flag = 1;
+				list_add_tail(&p->partition_link, &order_p->partition_link);
+				break;
+			}
+		}
+		if(rq->partition.tail_flag == 0)
+			list_add_tail(&p->partition_link, &rq->partition.expired_list);
+	}
+}
+
+
+void move_task_from_ready_to_expired(struct rq *rq,struct task_struct *p)
+{
+	p->my_job->release_time = p->my_job->next_release_time;
+	p->my_job->next_release_time = p->my_job->release_time + p->p;
+	p->my_job->remaining_c = p->c_real;
+	//spin_lock(&rq->partition.lock);
+	list_del(&p->partition_link);
+	//spin_unlock(&rq->partition.lock);
+	add_task_to_expired_by_release_time(rq,p);
+}
+
+void move_task_from_expired_to_ready(struct rq *rq, struct task_struct *expired_p, struct partition_scheduling *p_sched)
+{
+	list_del(&expired_p->partition_link);
+	//add_task_to_ready_by_remaining_c(rq, expired_p);
+	//p_sched->activate_flag = 1;
+	enqueue_task_partition(rq, expired_p, 1, true);
+	
+}
+
+void print_task_in_ready_expired(struct rq *rq)
+{
+	struct list_head *ptr;
+	struct task_struct *p;
+	if(!list_empty(&rq->partition.ready_list))
+	{
+		list_for_each(ptr, &rq->partition.ready_list)		
+		{
+			p = list_entry(ptr, struct task_struct, partition_link);
+			printk(KERN_ALERT "ready_list cpu:%d remaining_c:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->remaining_c,p->partition_id,p->pid);
+		}
+	}
+	if(!list_empty(&rq->partition.expired_list))
+	{
+		list_for_each(ptr, &rq->partition.expired_list)
+		{
+			p = list_entry(ptr, struct task_struct, partition_link);
+			printk(KERN_ALERT "expired_list cpu:%d release_time:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->release_time,p->partition_id,p->pid);
+		}
+	}
+	
+}
+
 static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued)
 {    
      //tick重要函数，待实现，tick处理都在这个函数中
+	struct list_head *ptr;
+	struct task_struct *expired_p;
 	struct partition_scheduling *p_sched;
 	p_sched =get_partition_scheduling();
-	//rq->partition.partition_cpu_tick++;
+	if(p_sched->cpu_bitmap[rq->cpu])
+	{
+		if(p_sched->lcm < 2000)
+			printk(KERN_ALERT "I am in task_tick_partition cpu:%d tick:%d remaining_c:%llu idle_flag:%d ",rq->cpu,rq->partition.partition_cpu_tick,
+																				p->my_job->remaining_c,p->idle_flag);
+		rq->partition.partition_cpu_tick++;
+		if( (p->idle_flag == 0) && (p->my_job->remaining_c > 0))
+		//if(p->idle_flag == 0)
+			p->my_job->remaining_c--;
+		mb();
+		if(p->my_job->remaining_c == 0)
+		{
+			if(p_sched->lcm < 2000)
+				printk(KERN_ALERT "move_task_from_ready_to_expired cpu:%d",rq->cpu);
+			move_task_from_ready_to_expired(rq, p);
+			print_task_in_ready_expired(rq);
+		}
+		if(!list_empty(&rq->partition.expired_list))
+		{	list_for_each(ptr, &rq->partition.expired_list)
+			{
+				expired_p = list_entry(ptr, struct task_struct, partition_link);
+				if(expired_p->my_job->release_time == rq->partition.partition_cpu_tick)
+				{
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "move_task_from_expired_to_ready cpu:%d",rq->cpu);
+					move_task_from_expired_to_ready(rq, expired_p, p_sched);
+					print_task_in_ready_expired(rq);
+				}
+				else
+				{
+					break;
+				}	
+			}
+		}
+		else
+		{
+			if(p_sched->lcm < 1000)
+				printk(KERN_ALERT "expired_list is empty cpu:%d",rq->cpu);
+		}
+		
+	}
+		
 	if(rq->cpu == 0)
-		p_sched->lcm++;
-
+		p_sched->lcm++; 
+	
+	set_tsk_need_resched(rq->curr);
 	
 }
 
