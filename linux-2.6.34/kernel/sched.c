@@ -9613,7 +9613,7 @@ int partition_scheduler_start(void)
 	init_ready_job_on_partition_rq
 	初始化tick=0时的任务信息，此时所有任务都在ready_list上,给release_time等数据赋值
 */
-	init_ready_job_on_partition_rq(partition_sched);
+	//init_ready_job_on_partition_rq(partition_sched);
 	spin_unlock(&partition_sched->lock);
 	
 	mb();

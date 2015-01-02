@@ -165,10 +165,14 @@ void add_partition_idle_task_list(struct rq *rq, struct task_struct *p)
 void init_partition_job(struct partition_job *new_job, struct task_struct *p)
 {
 	new_job->task = p;
+	//new_job->release_time = 0;
+	//new_job->deadline = 0;
+	//new_job->next_release_time = 0;
+	//new_job->next_deadline = 0;
 	new_job->release_time = 0;
-	new_job->deadline = 0;
-	new_job->next_release_time = 0;
-	new_job->next_deadline = 0;
+	new_job->deadline = p->p;
+	new_job->next_release_time = new_job->deadline;
+	new_job->next_deadline = new_job->next_release_time + p->p;
 	if(p->idle_flag == 0)//非空任务
 		new_job->uti = (p->c_real)*T / (p->p);
 	else
@@ -234,7 +238,7 @@ void print_idle_job_in_rq(struct partition_scheduling *p_sched)
 			list_for_each(ptr,&rq->partition.ready_list)
 			{
 				idle_task = list_entry(ptr, struct task_struct, partition_link);
-				printk(KERN_ALERT "idle_job info partition_id:%d,rq->cpu:%d ",idle_task->partition_id,rq->cpu);
+				printk(KERN_ALERT "idle_job info partition_id:%d,rq->cpu:%d deadline:%llu",idle_task->partition_id,rq->cpu,idle_task->my_job->deadline);
 			}
 			
 		}
@@ -250,7 +254,7 @@ void print_order_link_job(struct partition_scheduling *p_sched)
 	{
 		job = list_entry(ptr, struct partition_job, list);
 		{
-			printk(KERN_ALERT "not_idle_partition_id:%d uti:%d",job->task->partition_id,job->uti);
+			printk(KERN_ALERT "not_idle_partition_id:%d deadline:%llu uti:%d",job->task->partition_id,job->deadline,job->uti);
 		}
 	}
 }
@@ -351,7 +355,7 @@ void allocate_tasks(struct partition_scheduling *p_sched)
 	if(!cpu_uti)
 		return; 
 	init_cpu_uti(cpu_uti,p_sched);
-	p_sched->activate_flag = 1;//flag=1,任务按序进队列
+	p_sched->activate_flag = 1;//flag=1,任务按deadline进队列
 	list_for_each(ptr,&p_sched->partition_order_link_job)
 	{
 		job = list_entry(ptr, struct partition_job, list);
@@ -376,7 +380,7 @@ void print_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 	list_for_each(ptr, &rq->partition.ready_list)
 	{
 		p = list_entry(ptr, struct task_struct, partition_link);
-		printk(KERN_ALERT "uti:%d remaining_c:%llu pid:%d partition_id:%d",p->my_job->uti,p->my_job->remaining_c,p->pid,p->partition_id);
+		printk(KERN_ALERT "uti:%d remaining_c:%llu release_time:%llu deadline:%llu pid:%d partition_id:%d",p->my_job->uti,p->my_job->remaining_c,p->my_job->release_time,p->my_job->deadline,p->pid,p->partition_id);
 	}
 	nextcpu = next_cpu_rt_fair(firstcpu, p_sched);
 	while(nextcpu != firstcpu)
@@ -386,13 +390,14 @@ void print_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 		list_for_each(ptr, &rq->partition.ready_list)
 		{
 			p = list_entry(ptr, struct task_struct, partition_link);
-			printk(KERN_ALERT "uti:%d remaining_c:%llu pid:%d partition_id:%d",p->my_job->uti,p->my_job->remaining_c,p->pid,p->partition_id);
+			printk(KERN_ALERT "uti:%d remaining_c:%llu release_time:%llu deadline:%llu pid:%d partition_id:%d",p->my_job->uti,
+					p->my_job->remaining_c,p->my_job->release_time,p->my_job->deadline,p->pid,p->partition_id);
 		}
 		nextcpu = next_cpu_rt_fair(nextcpu, p_sched);
 	}
 }
 
-void print_expired_tasks_on_each_cpu(struct partition_scheduling *p_sched)
+/*void print_expired_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 {
 	int firstcpu,nextcpu;
 	struct list_head *ptr;
@@ -426,7 +431,7 @@ void print_expired_tasks_on_each_cpu(struct partition_scheduling *p_sched)
 			printk(KERN_ALERT "list is empty");
 		nextcpu = next_cpu_rt_fair(nextcpu, p_sched);
 	}
-}
+}*/
 
 //按照cpu利用率排序非空任务，并分配给固定的cpu
 void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
@@ -439,7 +444,7 @@ void allocate_tasks_on_cpus(struct partition_scheduling *p_sched)
 	printk(KERN_ALERT "allocate_task_on_cpus end");
 } 
 
-//初始化ready_list上的任务，release_time,next_release_time
+//初始化ready_list上的任务，release_time,deadline,next_release_time,next_deadline
 void init_ready_job_on_partition_rq(struct partition_scheduling *p_sched)
 {
 	int i;
@@ -455,8 +460,9 @@ void init_ready_job_on_partition_rq(struct partition_scheduling *p_sched)
 			{
 				p = list_entry(ptr, struct task_struct, partition_link);
 				p->my_job->release_time = rq->partition.partition_cpu_tick;
-				//p->my_job->remaining_c = p->c;//之前已被初始化,无需再初始化
-				p->my_job->next_release_time = p->my_job->release_time + p->p;
+				p->my_job->deadline = p->p;
+				p->my_job->next_release_time = p->my_job->deadline;
+				p->my_job->next_deadline = p->my_job->next_release_time + p->p;
 			}
 		}
 		
@@ -475,20 +481,26 @@ static void enqueue_task_partition(struct rq *rq, struct task_struct *p, int wak
 	struct task_struct *p_compare;
 	struct partition_scheduling *p_sched;
 	p_sched = get_partition_scheduling();
-	printk(KERN_ALERT "enqueue_task_partition activate_flag:%d cpu:%d",p_sched->activate_flag,rq->cpu);
+	printk(KERN_ALERT "enqueue_task_partition activate_flag:%d cpu:%d deadline:%llu",p_sched->activate_flag,rq->cpu,p->my_job->deadline);
 	if(p_sched->activate_flag == 0)//加入队列的尾部，一般情况
 		list_add_tail(&p->partition_link, &rq->partition.ready_list);
 	else//flag=1,按照remaining_c从小到大加入队列
 	{
+	  if(!list_empty(&rq->partition.ready_list))
 		list_for_each(ptr, &rq->partition.ready_list)
 		{
+			
 			p_compare = list_entry(ptr, struct task_struct, partition_link);
-			if(p->my_job->remaining_c < p_compare->my_job->remaining_c)
+			//printk(KERN_ALERT "I am in list_for_each pdeadline:%llu pcomdeadline:%llu",p->my_job->deadline,p_compare->my_job->deadline);
+			//if(p->my_job->remaining_c < p_compare->my_job->remaining_c)
+			if(p->my_job->deadline < p_compare->my_job->deadline)
 			{
 				list_add_tail(&p->partition_link, &p_compare->partition_link);
 				break;
 			}
 		}
+	  else
+		printk(KERN_ALERT "ready_list is empty");
 	}
 }
 
@@ -599,7 +611,9 @@ void add_task_to_expired_by_release_time(struct rq *rq, struct task_struct *p)
 void move_task_from_ready_to_expired(struct rq *rq,struct task_struct *p)
 {
 	p->my_job->release_time = p->my_job->next_release_time;
+	p->my_job->deadline = p->my_job->next_deadline;
 	p->my_job->next_release_time = p->my_job->release_time + p->p;
+	p->my_job->next_deadline = p->my_job->deadline + p->p;
 	p->my_job->remaining_c = p->c_real;
 	//spin_lock(&rq->partition.lock);
 	list_del(&p->partition_link);
@@ -610,8 +624,6 @@ void move_task_from_ready_to_expired(struct rq *rq,struct task_struct *p)
 void move_task_from_expired_to_ready(struct rq *rq, struct task_struct *expired_p, struct partition_scheduling *p_sched)
 {
 	list_del(&expired_p->partition_link);
-	//add_task_to_ready_by_remaining_c(rq, expired_p);
-	//p_sched->activate_flag = 1;
 	enqueue_task_partition(rq, expired_p, 1, true);
 	
 }
@@ -625,7 +637,7 @@ void print_task_in_ready_expired(struct rq *rq)
 		list_for_each(ptr, &rq->partition.ready_list)		
 		{
 			p = list_entry(ptr, struct task_struct, partition_link);
-			printk(KERN_ALERT "ready_list cpu:%d remaining_c:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->remaining_c,p->partition_id,p->pid);
+			printk(KERN_ALERT "ready_list cpu:%d remaining_c:%llu release_time:%llu deadline:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->remaining_c,p->my_job->release_time,p->my_job->deadline,p->partition_id,p->pid);
 		}
 	}
 	if(!list_empty(&rq->partition.expired_list))
@@ -633,7 +645,8 @@ void print_task_in_ready_expired(struct rq *rq)
 		list_for_each(ptr, &rq->partition.expired_list)
 		{
 			p = list_entry(ptr, struct task_struct, partition_link);
-			printk(KERN_ALERT "expired_list cpu:%d release_time:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->release_time,p->partition_id,p->pid);
+			printk(KERN_ALERT "expired_list cpu:%d release_time:%llu deadline:%llu partition_id:%d real_id:%d",rq->cpu,p->my_job->release_time,
+								p->my_job->deadline,p->partition_id,p->pid);
 		}
 	}
 	
@@ -649,8 +662,8 @@ static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued
 	if(p_sched->cpu_bitmap[rq->cpu])
 	{
 		if(p_sched->lcm < 2000)
-			printk(KERN_ALERT "I am in task_tick_partition cpu:%d tick:%d remaining_c:%llu idle_flag:%d ",rq->cpu,rq->partition.partition_cpu_tick,
-																				p->my_job->remaining_c,p->idle_flag);
+			printk(KERN_ALERT "I am in task_tick_partition cpu:%d tick:%d remaining_c:%llu deadline:%llu release_time:%llu idle_flag:%d ",rq->cpu,
+				rq->partition.partition_cpu_tick,p->my_job->remaining_c,p->my_job->deadline,p->my_job->release_time,p->idle_flag);
 		rq->partition.partition_cpu_tick++;
 		if( (p->idle_flag == 0) && (p->my_job->remaining_c > 0))
 		//if(p->idle_flag == 0)
