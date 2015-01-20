@@ -2618,11 +2618,17 @@ struct partition_para
 struct partition_rq
 {
     spinlock_t lock;
+	int num_task;
+	int num_from_expired_to_ready;
 	int ready;
     int partition_cpu_tick; //it starts to be counted since cpu boot
 	int tail_flag;
 	struct list_head expired_list;//运行结束的task队列
 	struct list_head ready_list;//待运行和正在运行的任务队列
+	struct list_head *ptr1;
+	struct list_head *ptr2;
+	struct task_struct *expired_p;
+	struct task_struct *ready_p;
 	struct task_struct *curr;
 	struct partition_job *idle_partition_job;
 };

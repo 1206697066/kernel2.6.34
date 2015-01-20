@@ -9519,13 +9519,15 @@ int do_sched_setscheduler_partition_to_normal(int num_partition_thread,pid_t * p
 		}
 		rcu_read_unlock();
 	}
+	partition_sched = get_partition_scheduling();
 	for_each_possible_cpu(i)
 	{
         rq = cpu_rq(i);
 		printk(KERN_ALERT "cpu%d tick:%d",i,rq->partition.partition_cpu_tick);
-        init_partition_rq(&rq->partition);
+		if(partition_sched->cpu_bitmap[i] == 1)
+        	init_partition_rq(&rq->partition);
     }
-	partition_sched = get_partition_scheduling();
+	
 	printk(KERN_ALERT "lcm:%llu sched_clock:%llu",partition_sched->lcm,sched_clock());
 	spin_lock(&partition_sched->lock);      
     re_ini_partition_scheduling(partition_sched);

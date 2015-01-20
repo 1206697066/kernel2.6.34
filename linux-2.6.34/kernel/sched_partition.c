@@ -78,13 +78,21 @@ void re_ini_partition_scheduling(struct partition_scheduling *partition_sched)
 void init_partition_rq(struct partition_rq *partition_rq)
 {
 	spin_lock_init(&partition_rq->lock);
+	partition_rq->num_task = 0;
+	partition_rq->num_from_expired_to_ready = 0;
 	partition_rq->ready = 0;
 	partition_rq->partition_cpu_tick = 0;
 	partition_rq->tail_flag = 0;
 	partition_rq->curr= NULL;
+	partition_rq->expired_p = NULL;
+	partition_rq->ready_p = NULL;
 	partition_rq->idle_partition_job = NULL;
 	INIT_LIST_HEAD(&partition_rq->expired_list);
 	INIT_LIST_HEAD(&partition_rq->ready_list);
+	
+	INIT_LIST_HEAD(partition_rq->ptr1);
+	INIT_LIST_HEAD(partition_rq->ptr2);
+	
 	#ifdef PARTITION_DEBUG
         printk(KERN_ALERT "init_partition_rq\n");
 	#endif
@@ -652,11 +660,35 @@ void print_task_in_ready_expired(struct rq *rq)
 	
 }
 
+
+void move_p_to_other_cpu(struct task_struct *p,int cpu_num)
+{
+	struct rq *src_rq;
+	struct rq *des_rq;
+	src_rq = task_rq(p);
+	des_rq = cpu_rq(cpu_num);
+	if(src_rq != des_rq)
+	{       
+        while( task_running(src_rq, p) )
+		{
+            mb();
+        }
+    }
+	spin_lock(&src_rq->partition.lock);
+	spin_lock(&des_rq->partition.lock);
+	deactivate_task(src_rq, p, 0);
+    /set_task_cpu(p, des_rq->cpu);//设置任务在指定cpu上运行
+	activate_task(des_rq, p, 0);
+	spin_unlock(&des_rq->partition.lock);
+	spin_unlock(&src_rq->partition.lock);
+}
+
 static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued)
 {    
-     //tick重要函数，待实现，tick处理都在这个函数中
-	struct list_head *ptr;
-	struct task_struct *expired_p;
+    //tick重要函数，待实现，tick处理都在这个函数中
+	//struct list_head *ptr;
+	//struct task_struct *expired_p;
+	//struct task_struct *ready_p;
 	struct partition_scheduling *p_sched;
 	p_sched =get_partition_scheduling();
 	if(p_sched->cpu_bitmap[rq->cpu])
@@ -673,24 +705,41 @@ static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued
 		{
 			if(p_sched->lcm < 2000)
 				printk(KERN_ALERT "move_task_from_ready_to_expired cpu:%d",rq->cpu);
+			spin_lock(&rq->partition.lock);
 			move_task_from_ready_to_expired(rq, p);
+			spin_unlock(&rq->partition.lock);
 			print_task_in_ready_expired(rq);
 		}
+		//因为list_for_each的原因，这个循环的删除操作存在问题，需要修改(已修改)
+		//spin_lock(&p_sched->lock);
 		if(!list_empty(&rq->partition.expired_list))
-		{	list_for_each(ptr, &rq->partition.expired_list)
+		{	list_for_each(rq->partition.ptr1, &rq->partition.expired_list)
 			{
-				expired_p = list_entry(ptr, struct task_struct, partition_link);
-				if(expired_p->my_job->release_time == rq->partition.partition_cpu_tick)
+				rq->partition.expired_p = list_entry(rq->partition.ptr1, struct task_struct, partition_link);
+				if(rq->partition.expired_p->my_job->release_time == rq->partition.partition_cpu_tick)
 				{
-					if(p_sched->lcm < 2000)
-						printk(KERN_ALERT "move_task_from_expired_to_ready cpu:%d",rq->cpu);
-					move_task_from_expired_to_ready(rq, expired_p, p_sched);
-					print_task_in_ready_expired(rq);
+					rq->partition.num_from_expired_to_ready++;
 				}
 				else
 				{
 					break;
 				}	
+			}
+			while(rq->partition.num_from_expired_to_ready > 0)
+			{
+				list_for_each(rq->partition.ptr1, &rq->partition.expired_list)
+				{
+					rq->partition.expired_p = list_entry(rq->partition.ptr1, struct task_struct, partition_link);
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "move_task_from_expired_to_ready cpu:%d",rq->cpu);
+					spin_lock(&rq->partition.lock);
+					move_task_from_expired_to_ready(rq, rq->partition.expired_p, p_sched);
+					spin_unlock(&rq->partition.lock);
+					if(p_sched->lcm < 2000)
+						print_task_in_ready_expired(rq);
+					break;
+				}
+				rq->partition.num_from_expired_to_ready--;
 			}
 		}
 		else
@@ -698,12 +747,94 @@ static void task_tick_partition(struct rq *rq, struct task_struct *p, int queued
 			if(p_sched->lcm < 1000)
 				printk(KERN_ALERT "expired_list is empty cpu:%d",rq->cpu);
 		}
+		//spin_unlock(&p_sched->lock);
 		
 	}
 		
 	if(rq->cpu == 0)
 		p_sched->lcm++; 
-	
+
+	//migration
+	spin_lock(&p_sched->lock);
+	if(rq->partition.partition_cpu_tick == 1800)
+	{
+		mb();
+		if(p_sched->lcm < 2000)
+						printk(KERN_EMERG "tick is 1800 cpu:%d",rq->cpu);
+		mb();
+		if(!list_empty(&rq->partition.ready_list))		
+		{
+			mb();
+			list_for_each(rq->partition.ptr2, &rq->partition.ready_list)
+			{
+				rq->partition.ready_p = list_entry(rq->partition.ptr2, struct task_struct, partition_link);
+				//1、待完善				
+				/*rq->partition.num_task++;
+				if(rq->partition.num_task == 2 && rq->partition.ready_p->idle_flag == 0)
+				{
+					mb();
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "before move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					//print_task_in_ready_expired(cpu_rq((rq->cpu)+1));
+					move_p_to_other_cpu(rq->partition.ready_p,(rq->cpu)+1);
+					//deactivate_task(task_rq(rq->partition.ready_p), rq->partition.ready_p, 0);
+					//list_del(&rq->partition.ready_p->partition_link);
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "after move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					break;
+					//print_task_in_ready_expired(cpu_rq((rq->cpu)+1));
+					
+				}*/
+				//2、可运行
+				/*if(rq->partition.ready_p->idle_flag == 0)
+				{
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "before move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					print_task_in_ready_expired(cpu_rq(6));
+					if(rq->cpu != 6)
+					{
+						spin_lock(&rq->partition.lock);
+						spin_lock(&cpu_rq(6)->partition.lock);
+						list_del_init(&rq->partition.ready_p->partition_link);
+						enqueue_task_partition(cpu_rq(6), rq->partition.ready_p, 1, true); 
+						spin_unlock(&cpu_rq(6)->partition.lock);
+						spin_unlock(&rq->partition.lock);
+					}
+					
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "after move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					print_task_in_ready_expired(cpu_rq(6));
+					break;
+				}*/
+				//3、new
+				if(rq->partition.ready_p->idle_flag == 0)
+				{
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "before move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					print_task_in_ready_expired(cpu_rq(6));
+					if(rq->cpu != 6)
+					{						
+						move_p_to_other_cpu(rq->partition.ready_p,6);			
+					}
+					if(p_sched->lcm < 2000)
+						printk(KERN_ALERT "after move_p_to_other_cpu cpu:%d",rq->cpu);
+					print_task_in_ready_expired(rq);
+					print_task_in_ready_expired(cpu_rq(6));
+					break;
+				}
+					
+			}
+			
+		}
+	}
+	spin_unlock(&p_sched->lock);
+
+
 	set_tsk_need_resched(rq->curr);
 	
 }
